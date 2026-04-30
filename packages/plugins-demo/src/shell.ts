@@ -13,7 +13,7 @@ const execFileAsync = promisify(execFile);
 export interface ShellPluginOptions {
   uri?: string;
   cwd?: string;
-  allowed_commands?: string[];
+  allowed_commands?: string[] | null;
   timeout_ms?: number;
   max_buffer_bytes?: number;
 }
@@ -24,7 +24,9 @@ export interface ShellPlugin {
 
 export function createShellPlugin(options: ShellPluginOptions = {}): ShellPlugin {
   const node = createNode(options.uri ?? "plugin://local/shell");
-  const allowed = new Set(options.allowed_commands ?? ["pwd", "echo", "ls"]);
+  const allowed = options.allowed_commands === null
+    ? null
+    : new Set(options.allowed_commands ?? ["pwd", "echo", "ls"]);
   const defaultCwd = options.cwd ?? process.cwd();
   const timeoutMs = options.timeout_ms ?? 5000;
   const maxBuffer = options.max_buffer_bytes ?? 1024 * 128;
@@ -32,13 +34,15 @@ export function createShellPlugin(options: ShellPluginOptions = {}): ShellPlugin
   node.action<SlockShellExecRequest, SlockShellExecResult>(
     "exec",
     {
-      description: "Execute an allowlisted local command without shell expansion.",
+      description: allowed
+        ? "Execute an allowlisted local command without shell expansion."
+        : "Execute an approved local command without shell expansion.",
       accepts: SLOCK_SHELL_EXEC_MIME,
       returns: SLOCK_SHELL_RESULT_MIME,
     },
     async (payload) => {
       const request = normalizeRequest(payload.data);
-      if (!allowed.has(request.command)) {
+      if (allowed && !allowed.has(request.command)) {
         throw new Error(`command is not allowed: ${request.command}`);
       }
 

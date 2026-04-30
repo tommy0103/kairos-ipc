@@ -8,6 +8,7 @@ export interface AgentRuntimeContext {
   agent_uri: EndpointUri;
   correlation_id?: string;
   node: AgentRuntimeIpc;
+  signal?: AbortSignal;
 }
 
 export type AgentRuntimeEvent =
@@ -15,11 +16,13 @@ export type AgentRuntimeEvent =
       type: "message_delta";
       text: string;
       thread_id?: string;
+      metadata?: Record<string, unknown>;
     }
   | {
       type: "status";
       text: string;
       thread_id?: string;
+      metadata?: Record<string, unknown>;
     }
   | {
       type: "final";

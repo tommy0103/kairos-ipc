@@ -164,6 +164,17 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
         return;
       }
 
+      if (request.method === "POST" && url.pathname.startsWith("/api/runs/") && url.pathname.endsWith("/cancel")) {
+        const messageId = decodeURIComponent(url.pathname.slice("/api/runs/".length, -"/cancel".length));
+        const body = await readJsonBody(request);
+        const result = await human.call(channelUri, "cancel_agent_run", {
+          mime_type: "application/json",
+          data: { message_id: messageId, reason: readReason(body) ?? "user cancelled" },
+        });
+        sendJson(response, 200, result.data);
+        return;
+      }
+
       if (request.method === "POST" && url.pathname.startsWith("/api/approvals/")) {
         if (!humanEndpoint) {
           sendJson(response, 404, { error: "approval endpoint is not configured" });
@@ -243,6 +254,10 @@ function readExplicitMentions(value: unknown): string[] | undefined {
     return undefined;
   }
   return value.mentions.filter((mention): mention is string => typeof mention === "string");
+}
+
+function readReason(value: unknown): string | undefined {
+  return isRecord(value) && typeof value.reason === "string" ? value.reason : undefined;
 }
 
 function readApprovalResult(value: unknown): SlockApprovalResult {

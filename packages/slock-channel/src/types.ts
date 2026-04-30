@@ -16,6 +16,18 @@ export interface SlockMessageInput {
   thread_id?: string | null;
 }
 
+export interface SlockCancelAgentRunRequest {
+  message_id: string;
+  reason?: string;
+}
+
+export interface SlockCancelAgentRunResult {
+  cancelled: boolean;
+  message_id: string;
+  agent?: EndpointUri;
+  reason?: string;
+}
+
 export interface SlockMessage {
   id: string;
   channel: EndpointUri;
@@ -27,25 +39,43 @@ export interface SlockMessage {
   created_at: string;
 }
 
+export interface SlockHistoryRequest {
+  limit?: number;
+  until_id?: string;
+  thread_id?: string | null;
+}
+
+export interface SlockHistoryResult {
+  messages: SlockMessage[];
+}
+
 export interface SlockChannelEvent {
-  type: "message_created" | "message_delta" | "agent_error";
+  type: "message_created" | "message_delta" | "agent_error" | "agent_cancelled";
   channel: EndpointUri;
   message?: SlockMessage;
   delta?: {
     thread_id: string;
     text: string;
     source: EndpointUri;
+    kind?: "text" | "status";
+    metadata?: Record<string, unknown>;
   };
   error?: {
     code: string;
     message: string;
     source: EndpointUri;
   };
+  cancelled?: {
+    message_id: string;
+    agent: EndpointUri;
+    reason?: string;
+  };
 }
 
 export interface SlockAgentRun {
   channel: EndpointUri;
   message_id: string;
+  thread_id?: string | null;
   text: string;
   sender: EndpointUri;
 }
@@ -54,12 +84,15 @@ export interface SlockAgentResult {
   summary: string;
   final_text?: string;
   final_message_id?: string;
+  cancelled?: boolean;
+  reason?: string;
 }
 
 export interface SlockApprovalRequest {
   id?: string;
   risk: string;
   summary: string;
+  metadata?: Record<string, unknown>;
   proposed_call: {
     target: EndpointUri;
     action: string;

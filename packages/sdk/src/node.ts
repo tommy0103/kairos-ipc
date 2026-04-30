@@ -59,12 +59,34 @@ export interface EmitOptions {
   routing_slip?: EndpointUri[] | null;
 }
 
+export interface EndOptions extends EmitOptions {}
+
+export interface CancelOptions {
+  ttl_ms?: number;
+  correlation_id?: string;
+  reason?: string;
+}
+
 export interface EmitContext<TData = unknown> {
   envelope: Envelope<TData>;
   node: IpcNode;
 }
 
 export type EmitHandler<TData = unknown> = (payload: EnvelopePayload<TData>, context: EmitContext<TData>) => void | Promise<void>;
+
+export interface EndContext<TData = unknown> {
+  envelope: Envelope<TData>;
+  node: IpcNode;
+}
+
+export type EndHandler<TData = unknown> = (payload: EnvelopePayload<TData>, context: EndContext<TData>) => void | Promise<void>;
+
+export interface CancelContext<TData = unknown> {
+  envelope: Envelope<TData>;
+  node: IpcNode;
+}
+
+export type CancelHandler<TData = unknown> = (payload: EnvelopePayload<TData>, context: CancelContext<TData>) => void | Promise<void>;
 
 interface PendingCall {
   resolve(payload: EnvelopePayload): void;
@@ -107,6 +129,8 @@ export class IpcNode {
   private readonly debug?: DebugSink;
   private readonly actions = new Map<string, ActionRegistration>();
   private readonly emitHandlers = new Map<string, Set<EmitHandler>>();
+  private readonly endHandlers = new Map<string, Set<EndHandler>>();
+  private readonly cancelHandlers = new Map<string, Set<CancelHandler>>();
   private readonly pending = new Map<string, PendingCall>();
   private readonly registerWaiters = new Map<EndpointUri, RegisterWaiter>();
   private transport?: IpcTransport;
@@ -266,6 +290,58 @@ export class IpcNode {
     });
   }
 
+  end<TData = unknown>(
+    target: EndpointUri,
+    action: string,
+    payload: EnvelopePayload<TData>,
+    options: EndOptions = {},
+  ): void {
+    this.sendFrame({
+      type: "envelope",
+      envelope: {
+        header: {
+          msg_id: createMsgId(),
+          correlation_id: options.correlation_id,
+          source: this.uri,
+          target,
+          reply_to: options.reply_to,
+          routing_slip: options.routing_slip,
+          ttl_ms: options.ttl_ms ?? this.defaultTtlMs,
+        },
+        spec: { op_code: "END", action },
+        payload,
+      },
+    });
+  }
+
+  cancel<TData = { reason?: string }>(
+    target: EndpointUri,
+    payload: EnvelopePayload<TData> = {
+      mime_type: "application/json",
+      data: {} as TData,
+    },
+    options: CancelOptions = {},
+  ): void {
+    const data = options.reason && isRecord(payload.data)
+      ? { ...payload.data, reason: options.reason } as TData
+      : payload.data;
+
+    this.sendFrame({
+      type: "envelope",
+      envelope: {
+        header: {
+          msg_id: createMsgId(),
+          correlation_id: options.correlation_id,
+          source: this.uri,
+          target,
+          ttl_ms: options.ttl_ms ?? this.defaultTtlMs,
+        },
+        spec: { op_code: "CANCEL" },
+        payload: { ...payload, data },
+      },
+    });
+  }
+
   onEmit<TData = unknown>(action: string, handler: EmitHandler<TData>): () => void {
     if (!action.trim()) {
       throw new Error("emit action must be non-empty");
@@ -282,6 +358,46 @@ export class IpcNode {
       handlers.delete(handler as EmitHandler);
       if (handlers.size === 0) {
         this.emitHandlers.delete(action);
+      }
+    };
+  }
+
+  onEnd<TData = unknown>(action: string, handler: EndHandler<TData>): () => void {
+    if (!action.trim()) {
+      throw new Error("end action must be non-empty");
+    }
+
+    let handlers = this.endHandlers.get(action);
+    if (!handlers) {
+      handlers = new Set<EndHandler>();
+      this.endHandlers.set(action, handlers);
+    }
+    handlers.add(handler as EndHandler);
+
+    return () => {
+      handlers.delete(handler as EndHandler);
+      if (handlers.size === 0) {
+        this.endHandlers.delete(action);
+      }
+    };
+  }
+
+  onCancel<TData = unknown>(action: string, handler: CancelHandler<TData>): () => void {
+    if (!action.trim()) {
+      throw new Error("cancel action must be non-empty");
+    }
+
+    let handlers = this.cancelHandlers.get(action);
+    if (!handlers) {
+      handlers = new Set<CancelHandler>();
+      this.cancelHandlers.set(action, handlers);
+    }
+    handlers.add(handler as CancelHandler);
+
+    return () => {
+      handlers.delete(handler as CancelHandler);
+      if (handlers.size === 0) {
+        this.cancelHandlers.delete(action);
       }
     };
   }
@@ -361,7 +477,32 @@ export class IpcNode {
     }
 
     if (envelope.spec.op_code === "EMIT") {
-      await this.dispatchEmit(envelope);
+      await this.handleEmit(envelope);
+      return;
+    }
+
+    if (envelope.spec.op_code === "END") {
+      await this.handleEnd(envelope);
+      return;
+    }
+
+    if (envelope.spec.op_code === "CANCEL") {
+      await this.dispatchCancel(envelope);
+    }
+  }
+
+  private async handleEmit(envelope: Envelope): Promise<void> {
+    await this.dispatchEmit(envelope);
+
+    if (envelope.spec.action && this.actions.has(envelope.spec.action)) {
+      await this.handleActionEnvelope(envelope, "EMIT");
+    }
+  }
+
+  private async handleEnd(envelope: Envelope): Promise<void> {
+    await this.dispatchEnd(envelope);
+    if (envelope.header.reply_to) {
+      this.forwardTerminalStreamEnvelope(envelope, "END");
     }
   }
 
@@ -375,15 +516,39 @@ export class IpcNode {
     await Promise.all(handlers.map((handler) => handler(envelope.payload, { envelope, node: this })));
   }
 
+  private async dispatchEnd(envelope: Envelope): Promise<void> {
+    const action = envelope.spec.action;
+    const handlers = [
+      ...(action ? this.endHandlers.get(action) ?? [] : []),
+      ...(this.endHandlers.get("*") ?? []),
+    ];
+
+    await Promise.all(handlers.map((handler) => handler(envelope.payload, { envelope, node: this })));
+  }
+
+  private async dispatchCancel(envelope: Envelope): Promise<void> {
+    const action = envelope.spec.action;
+    const handlers = [
+      ...(action ? this.cancelHandlers.get(action) ?? [] : []),
+      ...(this.cancelHandlers.get("*") ?? []),
+    ];
+
+    await Promise.all(handlers.map((handler) => handler(envelope.payload, { envelope, node: this })));
+  }
+
   private async handleCall(envelope: Envelope): Promise<void> {
+    await this.handleActionEnvelope(envelope, "RESOLVE");
+  }
+
+  private async handleActionEnvelope(envelope: Envelope, responseOpCode: "RESOLVE" | "EMIT"): Promise<void> {
     const action = envelope.spec.action;
     if (!action) {
-      this.sendReject(envelope, "ACTION_REQUIRED", "CALL envelope must include spec.action");
+      this.sendReject(envelope, "ACTION_REQUIRED", `${envelope.spec.op_code} envelope must include spec.action`);
       return;
     }
 
     try {
-      if (action === "manifest" && !this.actions.has("manifest")) {
+      if (envelope.spec.op_code === "CALL" && action === "manifest" && !this.actions.has("manifest")) {
         this.sendResolve(envelope, this.createManifestPayload());
         return;
       }
@@ -412,7 +577,12 @@ export class IpcNode {
         return;
       }
 
-      this.sendResolve(envelope, responsePayload);
+      if (responseOpCode === "RESOLVE") {
+        this.sendResolve(envelope, responsePayload);
+        return;
+      }
+
+      this.sendEmitResult(envelope, responsePayload);
     } catch (error) {
       this.sendReject(envelope, "ACTION_FAILED", error instanceof Error ? error.message : "action failed");
     }
@@ -425,6 +595,45 @@ export class IpcNode {
         header: this.createResponseHeader(request),
         spec: { op_code: "RESOLVE", action: request.spec.action },
         payload,
+      },
+    });
+  }
+
+  private sendEmitResult(request: Envelope, payload: EnvelopePayload): void {
+    const target = request.header.reply_to ?? request.header.source;
+    this.sendFrame({
+      type: "envelope",
+      envelope: {
+        header: {
+          msg_id: createMsgId(),
+          correlation_id: request.header.correlation_id ?? request.header.msg_id,
+          source: this.uri,
+          target,
+          reply_to: null,
+          routing_slip: request.header.routing_slip,
+          ttl_ms: this.defaultTtlMs,
+        },
+        spec: { op_code: "EMIT", action: request.spec.action },
+        payload,
+      },
+    });
+  }
+
+  private forwardTerminalStreamEnvelope(request: Envelope, opCode: "END"): void {
+    this.sendFrame({
+      type: "envelope",
+      envelope: {
+        header: {
+          msg_id: createMsgId(),
+          correlation_id: request.header.correlation_id ?? request.header.msg_id,
+          source: this.uri,
+          target: request.header.reply_to ?? request.header.source,
+          reply_to: null,
+          routing_slip: request.header.routing_slip,
+          ttl_ms: this.defaultTtlMs,
+        },
+        spec: { op_code: opCode, action: request.spec.action },
+        payload: request.payload,
       },
     });
   }

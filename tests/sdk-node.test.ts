@@ -256,6 +256,91 @@ test("SDK pipeline rejects directly back to the final receiver", async () => {
   await upper.close();
 });
 
+test("SDK treats EMIT, END, and CANCEL as stream subscription flow", async () => {
+  const context = createContext();
+  const ticker = createNode("plugin://sdk/ticker");
+  const upper = createNode("plugin://sdk/upper");
+  const agent = createNode("agent://sdk/agent");
+  const streamId = "stream_sdk_1";
+  const emitted: Array<{ data: unknown; correlation_id?: string; source: string }> = [];
+  const ended: Array<{ data: unknown; correlation_id?: string; source: string }> = [];
+  const cancelled: Array<{ data: unknown; correlation_id?: string; source: string }> = [];
+
+  upper.action(
+    "execute",
+    { accepts: "text/plain", returns: "text/plain" },
+    async (payload) => ({ mime_type: "text/plain", data: String(payload.data).toUpperCase() }),
+  );
+
+  agent.onEmit("execute", (payload, context) => {
+    emitted.push({
+      data: payload.data,
+      correlation_id: context.envelope.header.correlation_id,
+      source: context.envelope.header.source,
+    });
+  });
+
+  agent.onEnd("execute", (payload, context) => {
+    ended.push({
+      data: payload.data,
+      correlation_id: context.envelope.header.correlation_id,
+      source: context.envelope.header.source,
+    });
+  });
+
+  ticker.onCancel("*", (payload, context) => {
+    cancelled.push({
+      data: payload.data,
+      correlation_id: context.envelope.header.correlation_id,
+      source: context.envelope.header.source,
+    });
+  });
+
+  await ticker.connect(context.createTransport("ticker"));
+  await upper.connect(context.createTransport("upper"));
+  await agent.connect(context.createTransport("agent"));
+
+  ticker.emit("plugin://sdk/upper", "execute", {
+    mime_type: "text/plain",
+    data: "hello stream",
+  }, { correlation_id: streamId, reply_to: "agent://sdk/agent" });
+
+  await waitFor(() => emitted.length === 1);
+  assert.deepEqual(emitted[0], {
+    data: "HELLO STREAM",
+    correlation_id: streamId,
+    source: "plugin://sdk/upper",
+  });
+
+  ticker.end("plugin://sdk/upper", "execute", {
+    mime_type: "application/json",
+    data: { done: true },
+  }, { correlation_id: streamId, reply_to: "agent://sdk/agent" });
+
+  await waitFor(() => ended.length === 1);
+  assert.deepEqual(ended[0], {
+    data: { done: true },
+    correlation_id: streamId,
+    source: "plugin://sdk/upper",
+  });
+
+  agent.cancel("plugin://sdk/ticker", {
+    mime_type: "application/json",
+    data: {},
+  }, { correlation_id: streamId, reason: "subscriber stopped" });
+
+  await waitFor(() => cancelled.length === 1);
+  assert.deepEqual(cancelled[0], {
+    data: { reason: "subscriber stopped" },
+    correlation_id: streamId,
+    source: "agent://sdk/agent",
+  });
+
+  await ticker.close();
+  await upper.close();
+  await agent.close();
+});
+
 function createContext() {
   const dir = mkdtempSync(join("/tmp", "kairos-ipc-sdk-test-"));
   const registry = new EndpointRegistry();
@@ -325,5 +410,15 @@ class MemoryKernelTransport implements IpcTransport {
     for (const listener of this.listeners) {
       listener(frame);
     }
+  }
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 1000): Promise<void> {
+  const started = Date.now();
+  while (!condition()) {
+    if (Date.now() - started > timeoutMs) {
+      throw new Error("timed out waiting for condition");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }

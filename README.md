@@ -13,7 +13,7 @@ It is a message substrate for addressable actors.
 - The TypeScript endpoint SDK MVP lives in `packages/sdk`.
 - The kernel currently supports endpoint registration, envelope validation, routing, TTL rejection, source ownership checks, and trace JSONL.
 - The SDK currently supports connect/register, action handlers, `call()`, pending promise resolution, `RESOLVE`/`REJECT` wrapping, MIME accepts/returns checks, raw frame debug hooks, and a default `manifest` action.
-- The Slock slice currently includes a channel endpoint, browser UI bridge, mock agent adapter, calculator plugin, allowlisted shell plugin, and human approval endpoint.
+- The Slock slice currently includes a channel endpoint, browser UI bridge, mock agent adapter, calculator plugin, shell plugin, and human approval endpoint.
 
 ## Commands
 
@@ -24,6 +24,7 @@ npm run demo:echo
 npm run demo:pipeline
 npm run demo:slock-basic
 npm run demo:slock-agent-adapter
+npm run demo:slock-pi-faux
 npm run demo:slock-web -- --port 5173
 ```
 
@@ -72,7 +73,7 @@ human://user/local
 
 This is still pure IPC: channel, human, agent, and calculator are all endpoints, and the kernel remains unaware of Slock concepts.
 
-`npm run demo:slock-web -- --port 5173` starts the browser UI bridge. The page uses local HTTP for user actions and SSE for channel events, while the bridge uses `human://user/local` over IPC to talk to the channel.
+`npm run demo:slock-web -- --port 5173` starts the browser UI bridge. The page uses local HTTP for user actions and SSE for channel events, while the bridge uses `human://user/local` over IPC to talk to the channel. The web demo defaults to `agent://local/pi-assistant`, backed by `@mariozechner/pi-ai`.
 
 `npm run demo:slock-agent-adapter` runs a separate tool-agnostic adapter demo:
 
@@ -101,13 +102,24 @@ const agent = createPiAgent({
 
 Use `api_key` / `base_url` for direct values, or `api_key_env` / `base_url_env` when the values should be read from environment variables at runtime. Extra HTTP headers can be passed with `headers`.
 
-The default browser message is `@mock please run pwd`, which exercises the approval path:
+For `slock-web`, configure the default pi assistant with environment variables or CLI flags:
+
+```bash
+OPENAI_API_KEY=... npm run demo:slock-web -- --port 5173
+npm run demo:slock-web -- --provider openai --model gpt-4o-mini --base-url http://localhost:4000/v1
+```
+
+The pi assistant is exposed through `@pi`, `@pi-assistant`, and `@agent`. Its Slock tools are `read`, `write`, `edit`, and `exec`: `read` calls the workspace plugin directly; `write`, `edit`, and `exec` first request human approval, then call the workspace or shell plugin through IPC.
+
+By default, the pi assistant builds each run from recent Slock channel history, capped by `context_history_limit` and truncated at the current message id. Human messages are replayed as pi-ai user messages with mentions stripped, and prior Slock agent messages are replayed as pi-ai assistant messages. Set `context_history_limit: 0` to fall back to single-message runs.
+
+The approval path looks like this:
 
 ```text
-agent://local/mock
+agent://local/pi-assistant
   -> human://user/local request_approval
   -> plugin://local/shell exec
   -> app://slock/channel/general final message
 ```
 
-The shell plugin uses `execFile` with an allowlist, not arbitrary shell string execution.
+The shell plugin uses `execFile`, not arbitrary shell string execution. It defaults to an allowlist for no-approval demos; `slock-web` disables that allowlist because `exec` is already gated by human approval.

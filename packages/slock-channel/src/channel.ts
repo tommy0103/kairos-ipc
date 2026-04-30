@@ -8,7 +8,11 @@ import {
   SLOCK_MESSAGE_MIME,
   type SlockAgentResult,
   type SlockAgentRun,
+  type SlockCancelAgentRunRequest,
+  type SlockCancelAgentRunResult,
   type SlockChannelEvent,
+  type SlockHistoryRequest,
+  type SlockHistoryResult,
   type SlockMessage,
   type SlockMessageInput,
 } from "./types.ts";
@@ -29,6 +33,7 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
   const node = createNode(options.uri);
   const messages: SlockMessage[] = [];
   const subscribers = new Set<EndpointUri>();
+  const activeRuns = new Map<string, { agent_uri: EndpointUri; correlation_id: string; cancel_requested?: boolean; reason?: string }>();
   const historyLimit = options.history_limit ?? 100;
   const agentTtlMs = options.default_agent_ttl_ms ?? 600000;
   let nextMessageId = 1;
@@ -47,7 +52,7 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
     },
   );
 
-  node.action(
+  node.action<SlockHistoryRequest, SlockHistoryResult>(
     "history",
     {
       description: "Return recent channel messages.",
@@ -55,8 +60,8 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
       returns: "application/json",
     },
     async (payload) => {
-      const limit = readLimit(payload.data, 50);
-      return { mime_type: "application/json", data: { messages: messages.slice(-limit) } };
+      const request = readHistoryRequest(payload.data, 50);
+      return { mime_type: "application/json", data: { messages: selectHistory(request) } };
     },
   );
 
@@ -87,6 +92,53 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
     },
   );
 
+  node.action<SlockCancelAgentRunRequest, SlockCancelAgentRunResult>(
+    "cancel_agent_run",
+    {
+      description: "Cancel the active agent stream started by a channel message.",
+      accepts: "application/json",
+      returns: "application/json",
+    },
+    async (payload) => {
+      const request = readCancelAgentRunRequest(payload.data);
+      const run = activeRuns.get(request.message_id);
+      if (!run) {
+        return {
+          mime_type: "application/json",
+          data: {
+            cancelled: false,
+            message_id: request.message_id,
+            reason: "agent run is not active",
+          },
+        };
+      }
+
+      run.cancel_requested = true;
+      run.reason = request.reason ?? "cancelled";
+      node.cancel(run.agent_uri, {
+        mime_type: "application/json",
+        data: { message_id: request.message_id, reason: run.reason },
+      }, { correlation_id: run.correlation_id });
+      broadcast("agent_cancelled", {
+        cancelled: {
+          message_id: request.message_id,
+          agent: run.agent_uri,
+          reason: run.reason,
+        },
+      });
+
+      return {
+        mime_type: "application/json",
+        data: {
+          cancelled: true,
+          message_id: request.message_id,
+          agent: run.agent_uri,
+          reason: run.reason,
+        },
+      };
+    },
+  );
+
   node.onEmit("message_delta", async (payload, context) => {
     if (payload.mime_type !== SLOCK_MESSAGE_DELTA_MIME || !isRecord(payload.data)) {
       return;
@@ -97,6 +149,8 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
         thread_id: String(payload.data.thread_id ?? ""),
         text: String(payload.data.text ?? ""),
         source: context.envelope.header.source,
+        kind: payload.data.kind === "status" ? "status" : "text",
+        ...(isRecord(payload.data.metadata) ? { metadata: payload.data.metadata } : {}),
       },
     });
   });
@@ -141,6 +195,7 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
 
   async function runMentionedAgent(agentUri: EndpointUri, message: SlockMessage): Promise<void> {
     const correlationId = createCorrelationId("conv");
+    activeRuns.set(message.id, { agent_uri: agentUri, correlation_id: correlationId });
     try {
       const result = await node.call<SlockAgentRun, SlockAgentResult>(
         agentUri,
@@ -150,6 +205,7 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
           data: {
             channel: options.uri,
             message_id: message.id,
+            thread_id: message.thread_id,
             text: stripMentions(message.text),
             sender: message.sender,
           },
@@ -158,6 +214,20 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
       );
 
       const final = result.data;
+      const activeRun = activeRuns.get(message.id);
+      if (final.cancelled || activeRun?.cancel_requested) {
+        if (!activeRun?.cancel_requested) {
+          broadcast("agent_cancelled", {
+            cancelled: {
+              message_id: message.id,
+              agent: agentUri,
+              reason: final.reason,
+            },
+          });
+        }
+        return;
+      }
+
       const finalMessage = appendMessage({
         sender: agentUri,
         text: final.final_text ?? final.summary,
@@ -170,13 +240,54 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
       const code = error instanceof IpcCallError ? error.code : "AGENT_RUN_FAILED";
       const messageText = error instanceof Error ? error.message : "agent run failed";
       broadcast("agent_error", { error: { code, message: messageText, source: agentUri } });
+    } finally {
+      activeRuns.delete(message.id);
     }
+  }
+
+  function selectHistory(request: Required<Pick<SlockHistoryRequest, "limit">> & Omit<SlockHistoryRequest, "limit">): SlockMessage[] {
+    let selected = messages;
+    if (request.until_id) {
+      const index = selected.findIndex((message) => message.id === request.until_id);
+      selected = index >= 0 ? selected.slice(0, index + 1) : selected;
+    }
+
+    if (request.thread_id) {
+      selected = selected.filter((message) => message.id === request.thread_id || message.thread_id === request.thread_id);
+    }
+
+    return selected.slice(-request.limit);
   }
 }
 
+function readCancelAgentRunRequest(value: unknown): SlockCancelAgentRunRequest {
+  if (!isRecord(value) || typeof value.message_id !== "string" || value.message_id.trim().length === 0) {
+    throw new Error("cancel_agent_run requires message_id");
+  }
+  return {
+    message_id: value.message_id,
+    reason: typeof value.reason === "string" ? value.reason : undefined,
+  };
+}
+
+function readHistoryRequest(
+  value: unknown,
+  fallbackLimit: number,
+): Required<Pick<SlockHistoryRequest, "limit">> & Omit<SlockHistoryRequest, "limit"> {
+  if (!isRecord(value)) {
+    return { limit: fallbackLimit };
+  }
+
+  return {
+    limit: readLimit(value.limit, fallbackLimit),
+    until_id: typeof value.until_id === "string" ? value.until_id : undefined,
+    thread_id: typeof value.thread_id === "string" ? value.thread_id : value.thread_id === null ? null : undefined,
+  };
+}
+
 function readLimit(value: unknown, fallback: number): number {
-  if (isRecord(value) && typeof value.limit === "number" && Number.isFinite(value.limit)) {
-    return Math.max(0, Math.min(500, Math.trunc(value.limit)));
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return Math.max(0, Math.min(500, Math.trunc(value)));
   }
   return fallback;
 }
