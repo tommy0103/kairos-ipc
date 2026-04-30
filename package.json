@@ -1,0 +1,22 @@
+{
+  "name": "kairos-ipc-prototype",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "kernel": "node packages/kernel/src/main.ts",
+    "demo:echo": "node examples/echo-demo.ts",
+    "demo:pipeline": "node examples/pipeline-demo.ts",
+    "demo:slock-basic": "node examples/slock-basic-demo.ts",
+    "demo:slock-agent-adapter": "node examples/slock-agent-adapter-demo.ts",
+    "demo:slock-pi-faux": "node examples/slock-pi-faux-demo.ts",
+    "demo:slock-web": "node examples/slock-web-demo.ts",
+    "test": "node --test tests/*.test.ts"
+  },
+  "engines": {
+    "node": ">=25.0.0"
+  },
+  "dependencies": {
+    "@mariozechner/pi-ai": "^0.70.6"
+  }
+}
