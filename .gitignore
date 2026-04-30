@@ -1,4 +1,5 @@
 node_modules/
 traces/
+dev.docs/
 *.log
 .DS_Store
