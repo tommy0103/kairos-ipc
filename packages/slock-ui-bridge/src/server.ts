@@ -1,23 +1,30 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
+import type { EndpointUri } from "../../protocol/src/index.ts";
 import { createNode, type IpcNode } from "../../sdk/src/index.ts";
-import type { SlockHumanEndpoint } from "../../slock-human/src/index.ts";
+import type { ApprovalResolution, PendingApproval, SlockHumanEndpoint } from "../../slock-human/src/index.ts";
 import {
   SLOCK_CHANNEL_EVENT_MIME,
   SLOCK_MESSAGE_MIME,
+  type SlockApprovalEvent,
   type SlockApprovalResult,
   type SlockChannelEvent,
   type SlockMessage,
 } from "../../slock-channel/src/index.ts";
 import { renderCss, renderHtml, renderJs } from "./assets.ts";
-import { inferMentions, type MentionAliases } from "./mentions.ts";
+
+export interface SlockUiBridgeChannel {
+  uri: EndpointUri;
+  label?: string;
+  kind?: "channel" | "dm";
+}
 
 export interface SlockUiBridgeOptions {
-  channel_uri: string;
+  channel_uri?: EndpointUri;
+  channels?: SlockUiBridgeChannel[];
   human_node: IpcNode;
   human_endpoint?: SlockHumanEndpoint;
   uri?: string;
-  mention_aliases?: MentionAliases;
   history_limit?: number;
 }
 
@@ -36,10 +43,12 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
   const node = createNode(options.uri ?? "app://slock/ui-bridge");
   const human = options.human_node;
   const humanEndpoint = options.human_endpoint;
-  const channelUri = options.channel_uri;
-  const aliases = options.mention_aliases ?? { mock: "agent://local/mock" };
+  const channels = normalizeChannels(options);
+  const defaultChannelUri = channels[0].uri;
+  const channelUris = new Set(channels.map((channel) => channel.uri));
   const historyLimit = options.history_limit ?? 50;
   const clients = new Set<ServerResponse>();
+  const approvalChannels = new Map<string, EndpointUri>();
   let server: http.Server | undefined;
 
   node.action(
@@ -49,7 +58,10 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
       accepts: "application/json",
       returns: "application/json",
     },
-    async () => ({ mime_type: "application/json", data: { ok: true, channel: channelUri, clients: clients.size } }),
+    async () => ({
+      mime_type: "application/json",
+      data: { ok: true, channel: defaultChannelUri, default_channel: defaultChannelUri, channels, clients: clients.size },
+    }),
   );
 
   human.onEmit("*", (payload) => {
@@ -58,8 +70,22 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
     }
   });
 
+  human.onEnd("*", (payload) => {
+    if (payload.mime_type === SLOCK_CHANNEL_EVENT_MIME) {
+      broadcast(payload.data as SlockChannelEvent);
+    }
+  });
+
   humanEndpoint?.onApprovalRequest((approval) => {
-    broadcast({ type: "approval_requested", approval });
+    const channelUri = channelForApproval(approval);
+    approvalChannels.set(approval.id, channelUri);
+    publishApprovalRequested(channelUri, approval);
+  });
+
+  humanEndpoint?.onApprovalResolved((resolution) => {
+    const channelUri = approvalChannels.get(resolution.id) ?? defaultChannelUri;
+    approvalChannels.delete(resolution.id);
+    publishApprovalResolved(channelUri, resolution);
   });
 
   return { node, listen, close };
@@ -134,11 +160,17 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
       }
 
       if (request.method === "GET" && url.pathname === "/api/status") {
-        sendJson(response, 200, { ok: true, channel: channelUri, clients: clients.size });
+        sendJson(response, 200, { ok: true, channel: defaultChannelUri, default_channel: defaultChannelUri, channels, clients: clients.size });
+        return;
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/channels") {
+        sendJson(response, 200, { channels, default_channel: defaultChannelUri });
         return;
       }
 
       if (request.method === "GET" && url.pathname === "/api/history") {
+        const channelUri = readChannelUri(url);
         const history = await human.call<{ limit: number }, { messages: SlockMessage[] }>(channelUri, "history", {
           mime_type: "application/json",
           data: { limit: historyLimit },
@@ -148,17 +180,27 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
       }
 
       if (request.method === "GET" && url.pathname === "/api/approvals") {
-        sendJson(response, 200, { approvals: [...(humanEndpoint?.pendingApprovals.values() ?? [])] });
+        sendJson(response, 200, {
+          approvals: [...(humanEndpoint?.pendingApprovals.values() ?? [])].map((approval) => ({
+            ...approval,
+            channel: channelForApproval(approval),
+          })),
+        });
         return;
       }
 
       if (request.method === "POST" && url.pathname === "/api/messages") {
         const body = await readJsonBody(request);
+        const channelUri = readChannelUri(url, body);
         const text = readText(body);
-        const mentions = inferMentions(text, readExplicitMentions(body), aliases);
         const result = await human.call(channelUri, "post_message", {
           mime_type: SLOCK_MESSAGE_MIME,
-          data: { text, mentions, thread_id: null },
+          data: {
+            text,
+            mentions: readExplicitMentions(body),
+            thread_id: readThreadId(body),
+            reply_to_id: readReplyToId(body),
+          },
         });
         sendJson(response, 200, result.data);
         return;
@@ -167,6 +209,7 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
       if (request.method === "POST" && url.pathname.startsWith("/api/runs/") && url.pathname.endsWith("/cancel")) {
         const messageId = decodeURIComponent(url.pathname.slice("/api/runs/".length, -"/cancel".length));
         const body = await readJsonBody(request);
+        const channelUri = readChannelUri(url, body);
         const result = await human.call(channelUri, "cancel_agent_run", {
           mime_type: "application/json",
           data: { message_id: messageId, reason: readReason(body) ?? "user cancelled" },
@@ -185,13 +228,16 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
         const body = await readJsonBody(request);
         const result = readApprovalResult(body);
         humanEndpoint.decide(id, result);
-        broadcast({ type: "approval_resolved", id, result });
         sendJson(response, 200, { id, ...result });
         return;
       }
 
       sendJson(response, 404, { error: "not_found" });
     } catch (error) {
+      if (error instanceof HttpError) {
+        sendJson(response, error.status, { error: error.message });
+        return;
+      }
       const message = error instanceof Error ? error.message : "request failed";
       sendJson(response, 500, { error: message });
     }
@@ -203,7 +249,7 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
       "cache-control": "no-cache, no-transform",
       connection: "keep-alive",
     });
-    response.write(`data: ${JSON.stringify({ type: "bridge_connected", channel: channelUri })}\n\n`);
+    response.write(`data: ${JSON.stringify({ type: "bridge_connected", channel: defaultChannelUri, channels })}\n\n`);
     clients.add(response);
 
     request.on("close", () => {
@@ -216,6 +262,92 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
     for (const client of clients) {
       client.write(frame);
     }
+  }
+
+  function publishApprovalRequested(channelUri: EndpointUri, approval: PendingApproval): void {
+    const event: SlockApprovalEvent = approval;
+    void human.call(channelUri, "publish_approval_requested", {
+      mime_type: "application/json",
+      data: event,
+    }).catch((error) => {
+      broadcastPublishError(channelUri, "APPROVAL_REQUEST_PUBLISH_FAILED", error);
+    });
+  }
+
+  function publishApprovalResolved(channelUri: EndpointUri, resolution: ApprovalResolution): void {
+    void human.call(channelUri, "publish_approval_resolved", {
+      mime_type: "application/json",
+      data: { id: resolution.id, result: resolution.result },
+    }).catch((error) => {
+      broadcastPublishError(channelUri, "APPROVAL_RESOLUTION_PUBLISH_FAILED", error);
+    });
+  }
+
+  function broadcastPublishError(channelUri: EndpointUri, code: string, error: unknown): void {
+    broadcast({
+      type: "agent_error",
+      channel: channelUri,
+      error: {
+        code,
+        message: error instanceof Error ? error.message : "failed to publish channel event",
+        source: node.uri,
+      },
+    });
+  }
+
+  function readChannelUri(url: URL, body?: unknown): EndpointUri {
+    const requested = url.searchParams.get("channel") ?? (isRecord(body) && typeof body.channel === "string" ? body.channel : undefined);
+    const channelUri = requested && requested.trim().length > 0 ? requested.trim() : defaultChannelUri;
+    if (!channelUris.has(channelUri)) {
+      throw new HttpError(400, `unknown channel: ${channelUri}`);
+    }
+    return channelUri;
+  }
+
+  function channelForApproval(approval: PendingApproval): EndpointUri {
+    const metadata = approval.request.metadata;
+    const channel = isRecord(metadata) && typeof metadata.channel === "string" ? metadata.channel : undefined;
+    return channel && channelUris.has(channel) ? channel : defaultChannelUri;
+  }
+}
+
+function normalizeChannels(options: SlockUiBridgeOptions): SlockUiBridgeChannel[] {
+  const configured = options.channels && options.channels.length > 0
+    ? options.channels
+    : [{ uri: options.channel_uri ?? "app://slock/channel/general" }];
+  const seen = new Set<EndpointUri>();
+
+  return configured.map((channel) => {
+    if (!channel.uri) {
+      throw new Error("Slock UI bridge channel is missing uri");
+    }
+    if (seen.has(channel.uri)) {
+      throw new Error(`duplicate Slock UI bridge channel URI: ${channel.uri}`);
+    }
+    seen.add(channel.uri);
+    return {
+      uri: channel.uri,
+      label: channel.label ?? labelFromUri(channel.uri),
+      kind: channel.kind ?? kindFromUri(channel.uri),
+    };
+  });
+}
+
+function labelFromUri(uri: EndpointUri): string {
+  const parts = uri.split("/").filter(Boolean);
+  return decodeURIComponent(parts.at(-1) ?? uri);
+}
+
+function kindFromUri(uri: EndpointUri): "channel" | "dm" {
+  return uri.startsWith("app://slock/dm/") ? "dm" : "channel";
+}
+
+class HttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
   }
 }
 
@@ -254,6 +386,20 @@ function readExplicitMentions(value: unknown): string[] | undefined {
     return undefined;
   }
   return value.mentions.filter((mention): mention is string => typeof mention === "string");
+}
+
+function readThreadId(value: unknown): string | null {
+  if (!isRecord(value) || typeof value.thread_id !== "string" || value.thread_id.trim().length === 0) {
+    return null;
+  }
+  return value.thread_id;
+}
+
+function readReplyToId(value: unknown): string | null {
+  if (!isRecord(value) || typeof value.reply_to_id !== "string" || value.reply_to_id.trim().length === 0) {
+    return null;
+  }
+  return value.reply_to_id;
 }
 
 function readReason(value: unknown): string | undefined {

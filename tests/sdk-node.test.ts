@@ -256,6 +256,41 @@ test("SDK pipeline rejects directly back to the final receiver", async () => {
   await upper.close();
 });
 
+test("SDK aborts local pending CALL waits with AbortSignal", async () => {
+  const context = createContext();
+  const agent = createNode("agent://sdk/agent");
+  const slow = createNode("plugin://sdk/slow");
+  const controller = new AbortController();
+
+  slow.action("wait", async () => {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return { mime_type: "application/json", data: { done: true } };
+  });
+
+  await agent.connect(context.createTransport("agent"));
+  await slow.connect(context.createTransport("slow"));
+
+  const pending = agent.call("plugin://sdk/slow", "wait", {
+    mime_type: "application/json",
+    data: {},
+  }, { signal: controller.signal });
+
+  controller.abort("test abort");
+
+  await assert.rejects(
+    pending,
+    (error) => {
+      assert.ok(error instanceof IpcCallError);
+      assert.equal(error.code, "CALL_ABORTED");
+      assert.match(error.message, /test abort/);
+      return true;
+    },
+  );
+
+  await agent.close();
+  await slow.close();
+});
+
 test("SDK treats EMIT, END, and CANCEL as stream subscription flow", async () => {
   const context = createContext();
   const ticker = createNode("plugin://sdk/ticker");

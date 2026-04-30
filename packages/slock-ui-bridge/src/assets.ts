@@ -11,18 +11,22 @@ export function renderHtml(): string {
     <main class="shell">
       <section class="sidebar" aria-label="Channels">
         <div class="brand">Slock IPC</div>
-        <button class="channel active" type="button"># general</button>
+        <div class="channel-list" id="channel-list"></div>
       </section>
       <section class="workspace" aria-label="Channel">
         <header class="topbar">
           <div>
-            <div class="channel-title"># general</div>
+            <div class="channel-title" id="channel-title">Slock</div>
             <div class="status" id="status">connecting</div>
           </div>
           <button class="ghost" id="refresh" type="button">Refresh</button>
         </header>
         <div class="timeline" id="timeline" aria-live="polite"></div>
         <form class="composer" id="composer">
+          <div class="thread-context" id="thread-context" hidden>
+            <span id="thread-label"></span>
+            <button class="ghost" id="clear-thread" type="button">Clear</button>
+          </div>
           <textarea id="message" name="message" rows="2" autocomplete="off">@pi read package.json and summarize the scripts</textarea>
           <button type="submit">Send</button>
         </form>
@@ -77,6 +81,11 @@ button, textarea { font: inherit; }
 .brand {
   font-weight: 700;
   margin: 2px 8px 18px;
+}
+
+.channel-list {
+  display: grid;
+  gap: 4px;
 }
 
 .channel {
@@ -140,7 +149,15 @@ button, textarea { font: inherit; }
 }
 
 .message:hover, .delta:hover, .tool-call:hover { background: #fafbfc; }
+.message.thread-reply {
+  border-left: 3px solid #9eb5aa;
+  padding-left: 17px;
+}
 .delta { background: var(--delta); color: #304554; }
+.delta.thread-reply, .tool-call.thread-reply {
+  border-left: 3px solid #9eb5aa;
+  padding-left: 17px;
+}
 .error { color: var(--warn); background: #fff8ea; }
 .approval { background: #f9f6ef; }
 .tool-call { background: var(--tool); color: #26372c; }
@@ -289,6 +306,15 @@ button, textarea { font: inherit; }
   min-width: 0;
 }
 
+.grant-summary {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .approval-status {
   flex: 0 0 auto;
   border: 1px solid #d1bea0;
@@ -317,6 +343,33 @@ button, textarea { font: inherit; }
   background: #fbfcfd;
 }
 
+.thread-context {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  min-height: 32px;
+  border-left: 3px solid #9eb5aa;
+  padding: 4px 0 4px 10px;
+  color: var(--muted);
+}
+
+.thread-context[hidden] { display: none; }
+
+#thread-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-context .ghost {
+  flex: 0 0 auto;
+  height: 28px;
+}
+
 textarea {
   width: 100%;
   min-height: 46px;
@@ -342,8 +395,11 @@ textarea {
 .composer button:hover { background: var(--accent-strong); }
 
 @media (max-width: 720px) {
-  .shell { grid-template-columns: 1fr; }
-  .sidebar { display: none; }
+  .shell { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .sidebar { border-right: 0; border-bottom: 1px solid #34414a; padding: 10px 12px; }
+  .brand { margin: 0 0 8px; }
+  .channel-list { grid-auto-flow: column; grid-auto-columns: minmax(132px, max-content); overflow-x: auto; }
+  .channel { width: auto; }
   .message, .delta, .error, .approval, .tool-call { grid-template-columns: 1fr; gap: 2px; }
   .composer { grid-template-columns: 1fr; }
   .composer button { width: 100%; }
@@ -352,18 +408,75 @@ textarea {
 
 export function renderJs(): string {
   return `const timeline = document.querySelector("#timeline");
+const channelList = document.querySelector("#channel-list");
+const channelTitle = document.querySelector("#channel-title");
 const statusEl = document.querySelector("#status");
 const composer = document.querySelector("#composer");
 const messageInput = document.querySelector("#message");
 const refresh = document.querySelector("#refresh");
+const threadContext = document.querySelector("#thread-context");
+const threadLabel = document.querySelector("#thread-label");
+const clearThread = document.querySelector("#clear-thread");
 const rendered = new Set();
 const streamRows = new Map();
 const toolRows = new Map();
 const approvalById = new Map();
 const pendingToolApprovals = new Map();
+const typingTimers = new Map();
+let channels = [];
+let activeChannel = null;
+let activeThreadId = null;
+let activeReplyToId = null;
 
 function setStatus(value) {
   statusEl.textContent = value;
+}
+
+function channelLabel(channel) {
+  const label = channel.label || channel.uri.split("/").filter(Boolean).pop() || channel.uri;
+  return (channel.kind === "dm" ? "@ " : "# ") + label;
+}
+
+function channelUrl(path) {
+  const url = new URL(path, window.location.origin);
+  if (activeChannel) url.searchParams.set("channel", activeChannel.uri);
+  return url.pathname + url.search;
+}
+
+function renderChannelList() {
+  channelList.replaceChildren();
+  for (const channel of channels) {
+    const button = document.createElement("button");
+    button.className = "channel";
+    button.type = "button";
+    button.textContent = channelLabel(channel);
+    button.dataset.channelUri = channel.uri;
+    if (activeChannel && activeChannel.uri === channel.uri) button.classList.add("active");
+    button.addEventListener("click", () => switchChannel(channel.uri));
+    channelList.append(button);
+  }
+}
+
+async function switchChannel(uri) {
+  const next = channels.find((channel) => channel.uri === uri);
+  if (!next || (activeChannel && activeChannel.uri === next.uri)) return;
+  activeChannel = next;
+  channelTitle.textContent = channelLabel(next);
+  renderChannelList();
+  clearActiveThread(false);
+  resetTimeline();
+  await loadHistory().catch((error) => appendRow("error", "bridge", error.message));
+}
+
+function resetTimeline() {
+  for (const timer of typingTimers.values()) clearTimeout(timer);
+  rendered.clear();
+  streamRows.clear();
+  toolRows.clear();
+  approvalById.clear();
+  pendingToolApprovals.clear();
+  typingTimers.clear();
+  timeline.replaceChildren();
 }
 
 function appendRow(className, meta, text, id) {
@@ -434,6 +547,10 @@ function truncate(value, maxLength) {
   return value.length > maxLength ? value.slice(0, maxLength - 1) + "..." : value;
 }
 
+function compactText(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
 function parseJsonMaybe(value) {
   if (typeof value !== "string") return value;
   try {
@@ -474,6 +591,15 @@ function formatToolResult(tool) {
   return formatValue(parsed);
 }
 
+function grantSummary(result) {
+  const grant = result?.grant;
+  if (!isRecord(grant)) return "";
+  const actions = Array.isArray(grant.actions) ? grant.actions.filter((action) => typeof action === "string").join(",") : "";
+  const target = typeof grant.target === "string" ? grant.target : "target";
+  const expires = typeof grant.expires_at === "string" ? grant.expires_at : "";
+  return "grant " + target + (actions ? " " + actions : "") + (expires ? " until " + expires : "");
+}
+
 function diffPreview(approval) {
   const call = approval?.request?.proposed_call;
   const payload = call?.payload;
@@ -507,6 +633,7 @@ function createToolRow(delta, tool) {
   const row = document.createElement("div");
   row.className = "tool-call";
   row.dataset.toolCallId = tool.tool_call_id;
+  if (delta.thread_id) row.classList.add("thread-reply");
 
   const metaEl = document.createElement("div");
   metaEl.className = "meta";
@@ -581,7 +708,9 @@ function attachApprovalToToolRow(row, approval) {
   status.className = "approval-status";
   status.dataset.state = "pending";
   status.textContent = "approval required";
-  header.append(status);
+  const grant = document.createElement("span");
+  grant.className = "grant-summary";
+  header.append(status, grant);
 
   const diff = diffPreview(approval);
   const diffLabel = document.createElement("div");
@@ -620,6 +749,10 @@ function updateToolApproval(row, result) {
   if (status) {
     status.dataset.state = state;
     status.textContent = result.approved ? "approved" : "denied";
+  }
+  const grant = section.querySelector(".grant-summary");
+  if (grant) {
+    grant.textContent = grantSummary(result);
   }
   for (const button of section.querySelectorAll("button")) {
     button.disabled = true;
@@ -700,33 +833,104 @@ function renderApprovalResolved(event) {
 
   removeApprovalRow(event.id);
   approvalById.delete(event.id);
-  appendRow("delta", "approval", event.result.approved ? "Approved" : "Denied");
+  const summary = grantSummary(event.result);
+  appendRow("delta", "approval", (event.result.approved ? "Approved" : "Denied") + (summary ? "\\n" + summary : ""));
 }
 
 function renderMessage(message) {
   if (message.kind === "agent" && message.thread_id) {
-    markRunFinished(message.thread_id, "completed");
-    const id = "stream:" + message.sender + ":" + message.thread_id;
+    const runId = message.reply_to_id || message.thread_id;
+    markRunFinished(runId, "completed");
+    const id = "stream:" + message.sender + ":" + runId;
     streamRows.delete(id);
     removeRow(id);
   }
   const row = appendRow("message", message.sender, message.text, message.id);
-  if (row && message.kind === "human" && Array.isArray(message.mentions) && message.mentions.length > 0) {
-    attachRunCancel(row, message);
+  if (row) {
+    if (message.thread_id) row.classList.add("thread-reply");
+    attachMessageActions(row, message);
   }
 }
 
-function attachRunCancel(row, message) {
+function renderMessageUpdated(message) {
+  const row = document.querySelector('[data-rendered-id="' + message.id + '"]');
+  if (!row) {
+    renderMessage(message);
+    return;
+  }
+
+  const metaEl = row.querySelector(".meta");
   const textEl = row.querySelector(".text");
+  if (metaEl) metaEl.textContent = message.sender;
+  if (!textEl) return;
+
+  const actions = textEl.querySelector(".message-actions");
+  if (actions) actions.remove();
+  textEl.textContent = message.text;
+  if (actions) textEl.append(actions);
+}
+
+function renderTypingStarted(typing) {
+  const source = typing.source || "channel";
+  const id = "typing:" + source + ":" + (typing.thread_id ?? "");
+  let row = document.querySelector('[data-rendered-id="' + id + '"]');
+  if (!row) {
+    row = appendRow("delta", source, "typing...", id);
+  }
+
+  const currentTimer = typingTimers.get(id);
+  if (currentTimer) clearTimeout(currentTimer);
+  typingTimers.set(id, setTimeout(() => {
+    typingTimers.delete(id);
+    removeRow(id);
+  }, 2000));
+}
+
+function renderSubscriptionClosed(subscription) {
+  setStatus("subscription closed");
+  const reason = subscription.reason ? ": " + subscription.reason : "";
+  appendRow("delta", subscription.subscriber || "channel", "Subscription closed" + reason);
+}
+
+function attachMessageActions(row, message) {
+  const textEl = row.querySelector(".text");
+  const existing = textEl.querySelector(".message-actions");
+  if (existing) existing.remove();
+
   const actions = document.createElement("div");
   actions.className = "message-actions";
-  const cancel = document.createElement("button");
-  cancel.type = "button";
-  cancel.dataset.runCancelFor = message.id;
-  cancel.textContent = "Cancel";
-  cancel.addEventListener("click", () => cancelRun(message.id, cancel));
-  actions.append(cancel);
+
+  if (message.kind === "human" && Array.isArray(message.mentions) && message.mentions.length > 0) {
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.dataset.runCancelFor = message.id;
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", () => cancelRun(message.id, cancel));
+    actions.append(cancel);
+  }
+
+  const reply = document.createElement("button");
+  reply.type = "button";
+  reply.textContent = "Reply";
+  reply.addEventListener("click", () => setActiveThread(message));
+  actions.append(reply);
   textEl.append(actions);
+}
+
+function setActiveThread(message) {
+  activeThreadId = message.thread_id || message.id;
+  activeReplyToId = message.id;
+  threadLabel.textContent = "Thread: " + truncate(compactText(message.text) || activeThreadId, 96);
+  threadContext.hidden = false;
+  messageInput.focus();
+}
+
+function clearActiveThread(focus = true) {
+  activeThreadId = null;
+  activeReplyToId = null;
+  threadLabel.textContent = "";
+  threadContext.hidden = true;
+  if (focus) messageInput.focus();
 }
 
 function markRunFinished(messageId, state) {
@@ -744,6 +948,8 @@ function renderDelta(delta) {
     }
 
     appendRow("delta", delta.source, delta.text);
+    const row = timeline.lastElementChild;
+    if (row && delta.thread_id) row.classList.add("thread-reply");
     return;
   }
 
@@ -751,6 +957,7 @@ function renderDelta(delta) {
   let row = streamRows.get(id);
   if (!row) {
     row = appendRow("delta", delta.source, delta.text, id);
+    if (delta.thread_id) row.classList.add("thread-reply");
     streamRows.set(id, row);
     return;
   }
@@ -761,12 +968,30 @@ function renderDelta(delta) {
 }
 
 function renderEvent(event) {
+  if (event.type === "bridge_connected") {
+    return;
+  }
+  if (event.channel && activeChannel && event.channel !== activeChannel.uri) {
+    return;
+  }
   if (event.type === "message_created" && event.message) {
     renderMessage(event.message);
     return;
   }
+  if (event.type === "message_updated" && event.message) {
+    renderMessageUpdated(event.message);
+    return;
+  }
   if (event.type === "message_delta" && event.delta) {
     renderDelta(event.delta);
+    return;
+  }
+  if (event.type === "typing_started" && event.typing) {
+    renderTypingStarted(event.typing);
+    return;
+  }
+  if (event.type === "subscription_closed" && event.subscription) {
+    renderSubscriptionClosed(event.subscription);
     return;
   }
   if (event.type === "agent_error" && event.error) {
@@ -801,10 +1026,10 @@ async function decideApproval(id, approved) {
 async function cancelRun(messageId, button) {
   button.disabled = true;
   button.textContent = "Cancelling";
-  const response = await fetch("/api/runs/" + encodeURIComponent(messageId) + "/cancel", {
+  const response = await fetch(channelUrl("/api/runs/" + encodeURIComponent(messageId) + "/cancel"), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ reason: "user cancelled" }),
+    body: JSON.stringify({ channel: activeChannel?.uri, reason: "user cancelled" }),
   });
   if (!response.ok) {
     button.disabled = false;
@@ -814,10 +1039,23 @@ async function cancelRun(messageId, button) {
 }
 
 async function loadHistory() {
-  const response = await fetch("/api/history");
+  if (!activeChannel) return;
+  const response = await fetch(channelUrl("/api/history"));
   if (!response.ok) throw new Error(await response.text());
   const body = await response.json();
   for (const message of body.messages) renderMessage(message);
+}
+
+async function loadChannels() {
+  const response = await fetch("/api/channels");
+  if (!response.ok) throw new Error(await response.text());
+  const body = await response.json();
+  channels = Array.isArray(body.channels) ? body.channels : [];
+  activeChannel = channels.find((channel) => channel.uri === body.default_channel) || channels[0] || null;
+  if (!activeChannel) throw new Error("no channels configured");
+  channelTitle.textContent = channelLabel(activeChannel);
+  renderChannelList();
+  await loadHistory();
 }
 
 composer.addEventListener("submit", async (event) => {
@@ -825,15 +1063,17 @@ composer.addEventListener("submit", async (event) => {
   const text = messageInput.value.trim();
   if (!text) return;
   messageInput.value = "";
-  const response = await fetch("/api/messages", {
+  const response = await fetch(channelUrl("/api/messages"), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ channel: activeChannel?.uri, text, thread_id: activeThreadId, reply_to_id: activeReplyToId }),
   });
   if (!response.ok) {
     appendRow("error", "bridge", await response.text());
   }
 });
+
+clearThread.addEventListener("click", clearActiveThread);
 
 refresh.addEventListener("click", () => loadHistory().catch((error) => appendRow("error", "bridge", error.message)));
 
@@ -845,5 +1085,5 @@ events.onmessage = (message) => {
   renderEvent(event);
 };
 
-loadHistory().catch((error) => appendRow("error", "bridge", error.message));`;
+loadChannels().catch((error) => appendRow("error", "bridge", error.message));`;
 }

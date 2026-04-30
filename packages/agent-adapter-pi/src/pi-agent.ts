@@ -273,12 +273,12 @@ async function buildHistoryMessages<TApi extends Api>(
     const request: SlockHistoryRequest = {
       limit,
       until_id: input.message_id,
-      ...(options.context_history_scope === "thread" && input.thread_id ? { thread_id: input.thread_id } : {}),
+      ...(options.context_history_scope === "thread" ? { thread_id: input.thread_id ?? input.message_id } : {}),
     };
     const history = await context.node.call<SlockHistoryRequest, SlockHistoryResult>(input.channel, "history", {
       mime_type: "application/json",
       data: request,
-    }, { ttl_ms: 5000, correlation_id: context.correlation_id });
+    }, { ttl_ms: 5000, signal: context.signal });
 
     const model = resolveModel(options);
     const messages = history.data.messages.flatMap((message) => toPiMessage(message, input, model));

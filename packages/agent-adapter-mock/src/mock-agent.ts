@@ -39,7 +39,7 @@ export function createMockAgent(options: MockAgentOptions = {}): MockAgentAdapte
         calculatorUri,
         "add",
         { mime_type: "application/json", data: { a: 2, b: 3 } },
-        { ttl_ms: 30000, correlation_id: context.correlation_id },
+        { ttl_ms: 30000, signal: context.signal },
       );
 
       yield messageDelta(run, `Calculator returned ${calculation.data.result}.`);
@@ -74,10 +74,11 @@ async function* handleShellRun(
       data: {
         risk: "shell_exec",
         summary: "Run pwd to show the current working directory.",
+        metadata: { channel: run.channel, thread_id: run.message_id },
         proposed_call: proposedCall,
       },
     },
-    { ttl_ms: 300000, timeout_ms: 300000, correlation_id: context.correlation_id },
+    { ttl_ms: 300000, timeout_ms: 300000, signal: context.signal },
   );
 
   if (!approval.data.approved) {
@@ -95,7 +96,7 @@ async function* handleShellRun(
       mime_type: SLOCK_SHELL_EXEC_MIME,
       data: proposedCall.payload,
     },
-    { ttl_ms: approval.data.grant_ttl_ms ?? 30000, correlation_id: context.correlation_id },
+    { ttl_ms: approval.data.grant_ttl_ms ?? 30000, signal: context.signal },
   );
 
   yield messageDelta(run, `Shell command exited ${shell.data.exit_code}.`);

@@ -1,6 +1,7 @@
 import type { EndpointUri } from "../../protocol/src/index.ts";
 
-export type MentionAliases = Record<string, EndpointUri>;
+export type MentionAliasTarget = EndpointUri | EndpointUri[];
+export type MentionAliases = Record<string, MentionAliasTarget>;
 
 export function inferMentions(text: string, explicit: EndpointUri[] | undefined, aliases: MentionAliases): EndpointUri[] {
   const mentions = new Set<EndpointUri>(explicit ?? []);
@@ -9,12 +10,19 @@ export function inferMentions(text: string, explicit: EndpointUri[] | undefined,
 
   while (match) {
     const alias = match[2];
-    const uri = aliases[alias];
-    if (uri) {
+    const target = aliases[alias];
+    for (const uri of aliasTargets(target)) {
       mentions.add(uri);
     }
     match = aliasPattern.exec(text);
   }
 
   return [...mentions];
+}
+
+function aliasTargets(target: MentionAliasTarget | undefined): EndpointUri[] {
+  if (!target) {
+    return [];
+  }
+  return Array.isArray(target) ? target : [target];
 }

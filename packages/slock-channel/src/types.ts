@@ -14,6 +14,21 @@ export interface SlockMessageInput {
   text: string;
   mentions?: EndpointUri[];
   thread_id?: string | null;
+  reply_to_id?: string | null;
+}
+
+export interface SlockMessageUpdateInput {
+  message_id: string;
+  text: string;
+}
+
+export interface SlockTypingStartedInput {
+  thread_id?: string | null;
+}
+
+export interface SlockSubscriptionClosedInput {
+  subscriber?: EndpointUri;
+  reason?: string;
 }
 
 export interface SlockCancelAgentRunRequest {
@@ -25,6 +40,7 @@ export interface SlockCancelAgentRunResult {
   cancelled: boolean;
   message_id: string;
   agent?: EndpointUri;
+  agents?: EndpointUri[];
   reason?: string;
 }
 
@@ -35,8 +51,10 @@ export interface SlockMessage {
   text: string;
   mentions: EndpointUri[];
   thread_id: string | null;
+  reply_to_id: string | null;
   kind: "human" | "agent" | "system";
   created_at: string;
+  updated_at?: string;
 }
 
 export interface SlockHistoryRequest {
@@ -50,7 +68,16 @@ export interface SlockHistoryResult {
 }
 
 export interface SlockChannelEvent {
-  type: "message_created" | "message_delta" | "agent_error" | "agent_cancelled";
+  type:
+    | "message_created"
+    | "message_updated"
+    | "message_delta"
+    | "typing_started"
+    | "approval_requested"
+    | "approval_resolved"
+    | "subscription_closed"
+    | "agent_error"
+    | "agent_cancelled";
   channel: EndpointUri;
   message?: SlockMessage;
   delta?: {
@@ -70,6 +97,17 @@ export interface SlockChannelEvent {
     agent: EndpointUri;
     reason?: string;
   };
+  typing?: {
+    source: EndpointUri;
+    thread_id?: string | null;
+  };
+  subscription?: {
+    subscriber: EndpointUri;
+    reason?: string;
+  };
+  approval?: SlockApprovalEvent;
+  id?: string;
+  result?: SlockApprovalResult;
 }
 
 export interface SlockAgentRun {
@@ -100,9 +138,40 @@ export interface SlockApprovalRequest {
   };
 }
 
+export interface SlockApprovalEvent {
+  id: string;
+  request: SlockApprovalRequest;
+  source: EndpointUri;
+  created_at: string;
+}
+
 export interface SlockApprovalResult {
   approved: boolean;
   grant_ttl_ms?: number;
+  reason?: string;
+  grant?: SlockCapabilityGrant;
+}
+
+export interface SlockCapabilityGrant {
+  id: string;
+  token: string;
+  source: EndpointUri;
+  target: EndpointUri;
+  actions: string[];
+  issued_at: string;
+  expires_at: string;
+  approval_id?: string;
+  risk?: string;
+}
+
+export interface SlockApprovalWithdrawRequest {
+  id: string;
+  reason?: string;
+}
+
+export interface SlockApprovalWithdrawResult {
+  withdrawn: boolean;
+  id: string;
   reason?: string;
 }
 
@@ -110,6 +179,7 @@ export interface SlockShellExecRequest {
   command: string;
   args?: string[];
   cwd?: string;
+  approval_grant?: SlockCapabilityGrant;
 }
 
 export interface SlockShellExecResult {

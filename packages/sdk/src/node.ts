@@ -46,6 +46,7 @@ export interface CallOptions {
   ttl_ms?: number;
   correlation_id?: string;
   timeout_ms?: number;
+  signal?: AbortSignal;
 }
 
 export interface PipelineOptions extends CallOptions {
@@ -92,6 +93,7 @@ interface PendingCall {
   resolve(payload: EnvelopePayload): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
+  cleanup?: () => void;
 }
 
 interface RegisterWaiter {
@@ -182,6 +184,10 @@ export class IpcNode {
     const ttlMs = options.ttl_ms ?? this.defaultTtlMs;
     const timeoutMs = options.timeout_ms ?? ttlMs;
 
+    if (options.signal?.aborted) {
+      throw abortedCallError(target, action, options.signal);
+    }
+
     const envelope: Envelope<TData> = {
       header: {
         msg_id: createMsgId(),
@@ -198,13 +204,27 @@ export class IpcNode {
     const result = new Promise<EnvelopePayload<TResult>>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(correlationId);
+        cleanup?.();
         reject(new IpcCallError(`call timed out: ${target} action=${action}`, { code: "CALL_TIMEOUT" }));
       }, timeoutMs);
+
+      const onAbort = () => {
+        clearTimeout(timer);
+        this.pending.delete(correlationId);
+        cleanup?.();
+        reject(abortedCallError(target, action, options.signal));
+      };
+      const cleanup = options.signal
+        ? () => options.signal?.removeEventListener("abort", onAbort)
+        : undefined;
+
+      options.signal?.addEventListener("abort", onAbort, { once: true });
 
       this.pending.set(correlationId, {
         resolve: (next) => resolve(next as EnvelopePayload<TResult>),
         reject,
         timer,
+        cleanup,
       });
     });
 
@@ -229,6 +249,11 @@ export class IpcNode {
     const correlationId = options.correlation_id ?? createCorrelationId("pipe");
     const ttlMs = options.ttl_ms ?? this.defaultTtlMs;
     const timeoutMs = options.timeout_ms ?? ttlMs;
+
+    if (options.signal?.aborted) {
+      throw abortedPipelineError(fullRoute, options.signal);
+    }
+
     const target = fullRoute[0];
     const replyTo = fullRoute[1];
     const routingSlip = fullRoute.slice(2).reverse();
@@ -236,13 +261,27 @@ export class IpcNode {
     const result = new Promise<EnvelopePayload<TResult>>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(correlationId);
+        cleanup?.();
         reject(new IpcCallError(`pipeline timed out: ${fullRoute.join(" -> ")}`, { code: "PIPELINE_TIMEOUT" }));
       }, timeoutMs);
+
+      const onAbort = () => {
+        clearTimeout(timer);
+        this.pending.delete(correlationId);
+        cleanup?.();
+        reject(abortedPipelineError(fullRoute, options.signal));
+      };
+      const cleanup = options.signal
+        ? () => options.signal?.removeEventListener("abort", onAbort)
+        : undefined;
+
+      options.signal?.addEventListener("abort", onAbort, { once: true });
 
       this.pending.set(correlationId, {
         resolve: (next) => resolve(next as EnvelopePayload<TResult>),
         reject,
         timer,
+        cleanup,
       });
     });
 
@@ -410,6 +449,7 @@ export class IpcNode {
 
     for (const [correlationId, pending] of this.pending) {
       clearTimeout(pending.timer);
+      pending.cleanup?.();
       pending.reject(new IpcCallError(`node closed before call resolved: ${correlationId}`, { code: "NODE_CLOSED" }));
     }
     this.pending.clear();
@@ -589,7 +629,7 @@ export class IpcNode {
   }
 
   private sendResolve(request: Envelope, payload: EnvelopePayload): void {
-    this.sendFrame({
+    this.trySendFrame({
       type: "envelope",
       envelope: {
         header: this.createResponseHeader(request),
@@ -601,7 +641,7 @@ export class IpcNode {
 
   private sendEmitResult(request: Envelope, payload: EnvelopePayload): void {
     const target = request.header.reply_to ?? request.header.source;
-    this.sendFrame({
+    this.trySendFrame({
       type: "envelope",
       envelope: {
         header: {
@@ -620,7 +660,7 @@ export class IpcNode {
   }
 
   private forwardTerminalStreamEnvelope(request: Envelope, opCode: "END"): void {
-    this.sendFrame({
+    this.trySendFrame({
       type: "envelope",
       envelope: {
         header: {
@@ -639,7 +679,7 @@ export class IpcNode {
   }
 
   private sendReject(request: Envelope, code: string, message: string, detail?: unknown): void {
-    this.sendFrame({
+    this.trySendFrame({
       type: "envelope",
       envelope: {
         header: this.createRejectHeader(request),
@@ -691,6 +731,7 @@ export class IpcNode {
     }
 
     clearTimeout(pending.timer);
+    pending.cleanup?.();
     this.pending.delete(correlationId);
     pending.resolve(envelope.payload);
     return true;
@@ -708,6 +749,7 @@ export class IpcNode {
     }
 
     clearTimeout(pending.timer);
+    pending.cleanup?.();
     this.pending.delete(correlationId);
 
     const error = envelope.payload.data.error;
@@ -748,6 +790,19 @@ export class IpcNode {
     this.requireTransport().send(frame);
   }
 
+  private trySendFrame(frame: ClientFrame): boolean {
+    if (!this.transport) {
+      return false;
+    }
+
+    try {
+      this.sendFrame(frame);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private debugFrame(direction: "in" | "out", frame: ClientFrame | KernelFrame): void {
     if (!this.debug) {
       return;
@@ -780,6 +835,30 @@ function isPayload(value: unknown): value is EnvelopePayload {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function abortedCallError(target: EndpointUri, action: string, signal: AbortSignal | undefined): IpcCallError {
+  return new IpcCallError(`call aborted: ${target} action=${action}${abortReasonSuffix(signal)}`, { code: "CALL_ABORTED" });
+}
+
+function abortedPipelineError(route: EndpointUri[], signal: AbortSignal | undefined): IpcCallError {
+  return new IpcCallError(`pipeline aborted: ${route.join(" -> ")}${abortReasonSuffix(signal)}`, { code: "PIPELINE_ABORTED" });
+}
+
+function abortReasonSuffix(signal: AbortSignal | undefined): string {
+  if (!signal) {
+    return "";
+  }
+
+  if (typeof signal.reason === "string" && signal.reason.length > 0) {
+    return `: ${signal.reason}`;
+  }
+
+  if (signal.reason instanceof Error && signal.reason.message.length > 0) {
+    return `: ${signal.reason.message}`;
+  }
+
+  return "";
 }
 
 function mimeMatches(actual: string, expected?: MimeSpec): boolean {

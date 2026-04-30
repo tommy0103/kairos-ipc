@@ -2,6 +2,8 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createNode, type IpcNode } from "../../sdk/src/index.ts";
 import {
+  type SlockCapabilityGrant,
+  type SlockGrantStore,
   SLOCK_SHELL_EXEC_MIME,
   SLOCK_SHELL_RESULT_MIME,
   type SlockShellExecRequest,
@@ -16,6 +18,7 @@ export interface ShellPluginOptions {
   allowed_commands?: string[] | null;
   timeout_ms?: number;
   max_buffer_bytes?: number;
+  grant_store?: SlockGrantStore;
 }
 
 export interface ShellPlugin {
@@ -23,7 +26,8 @@ export interface ShellPlugin {
 }
 
 export function createShellPlugin(options: ShellPluginOptions = {}): ShellPlugin {
-  const node = createNode(options.uri ?? "plugin://local/shell");
+  const uri = options.uri ?? "plugin://local/shell";
+  const node = createNode(uri);
   const allowed = options.allowed_commands === null
     ? null
     : new Set(options.allowed_commands ?? ["pwd", "echo", "ls"]);
@@ -40,10 +44,10 @@ export function createShellPlugin(options: ShellPluginOptions = {}): ShellPlugin
       accepts: SLOCK_SHELL_EXEC_MIME,
       returns: SLOCK_SHELL_RESULT_MIME,
     },
-    async (payload) => {
+    async (payload, context) => {
       const request = normalizeRequest(payload.data);
-      if (allowed && !allowed.has(request.command)) {
-        throw new Error(`command is not allowed: ${request.command}`);
+      if (!isAllowedByCommandList(allowed, request.command)) {
+        assertGrant(options.grant_store, request.approval_grant, context.envelope.header.source, uri, "exec");
       }
 
       const cwd = request.cwd ?? defaultCwd;
@@ -86,7 +90,30 @@ export function createShellPlugin(options: ShellPluginOptions = {}): ShellPlugin
   return { node };
 }
 
-function normalizeRequest(value: SlockShellExecRequest): Required<Pick<SlockShellExecRequest, "command" | "args">> & Pick<SlockShellExecRequest, "cwd"> {
+function isAllowedByCommandList(allowed: Set<string> | null, command: string): boolean {
+  return allowed !== null && allowed.has(command);
+}
+
+function assertGrant(
+  store: SlockGrantStore | undefined,
+  grant: SlockCapabilityGrant | undefined,
+  source: string,
+  target: string,
+  action: string,
+): void {
+  if (!store) {
+    throw new Error("shell.exec requires a capability grant");
+  }
+
+  const decision = store.check({ grant, source, target, action });
+  if (!decision.allowed) {
+    throw new Error(decision.message ?? decision.code ?? "capability grant denied");
+  }
+}
+
+function normalizeRequest(
+  value: SlockShellExecRequest,
+): Required<Pick<SlockShellExecRequest, "command" | "args">> & Pick<SlockShellExecRequest, "cwd" | "approval_grant"> {
   if (!value || typeof value.command !== "string" || value.command.trim().length === 0) {
     throw new Error("shell.exec requires a command");
   }
@@ -104,5 +131,6 @@ function normalizeRequest(value: SlockShellExecRequest): Required<Pick<SlockShel
     command: value.command.trim(),
     args,
     cwd: value.cwd,
+    approval_grant: value.approval_grant,
   };
 }
