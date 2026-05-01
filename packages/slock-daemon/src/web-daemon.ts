@@ -9,7 +9,7 @@ import { EndpointRegistry } from "../../kernel/src/registry.ts";
 import { Router } from "../../kernel/src/router.ts";
 import { TraceWriter } from "../../kernel/src/trace.ts";
 import { createUnixNdjsonKernel } from "../../kernel/src/transport/unix-ndjson.ts";
-import { createCalculatorPlugin, createShellPlugin, createWorkspacePlugin } from "../../plugins-demo/src/index.ts";
+import { createCalculatorPlugin, createReMeMemoryPlugin, createShellPlugin, createWorkspacePlugin } from "../../plugins-demo/src/index.ts";
 import type { ClientFrame, KernelFrame } from "../../protocol/src/index.ts";
 import type { IpcNode } from "../../sdk/src/index.ts";
 import type { IpcTransport } from "../../sdk/src/transport.ts";
@@ -17,6 +17,7 @@ import { createSlockChannel, createSlockGrantStore } from "../../slock-channel/s
 import { createSlockHuman } from "../../slock-human/src/index.ts";
 import { createSlockUiBridge, type SlockUiBridge } from "../../slock-ui-bridge/src/index.ts";
 import { resolveSlockWebDaemonConfig, type SlockWebAgentConfig, type SlockWebDaemonConfig } from "./config.ts";
+import { createSlockRegistry, SLOCK_REGISTRY_URI, type SlockRegistryEndpoint } from "./registry-node.ts";
 
 export interface SlockWebDaemon {
   config: SlockWebDaemonConfig;
@@ -24,6 +25,7 @@ export interface SlockWebDaemon {
   socket_path: string;
   trace_path: string;
   ipc_address: string;
+  registry_uri: string;
   agent_uri: string;
   agent_uris: string[];
   channel_uri: string;
@@ -48,9 +50,11 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
   const agentConfigs = resolved.agents?.length ? resolved.agents : [required(resolved.agent, "agent")];
   const agentUris = agentConfigs.map((agent) => required(agent.uri, "agents[].uri"));
   const agentUri = agentUris[0];
+  const registryUri = SLOCK_REGISTRY_URI;
   const workspaceUri = required(resolved.plugins?.workspace?.uri, "plugins.workspace.uri");
   const shellUri = required(resolved.plugins?.shell?.uri, "plugins.shell.uri");
   const calculatorUri = required(resolved.plugins?.calculator?.uri, "plugins.calculator.uri");
+  const memoryUri = required(resolved.plugins?.memory?.uri, "plugins.memory.uri");
   const workspaceRoot = required(resolved.workspace_root, "workspace_root");
   const grantStore = createSlockGrantStore();
   const kernel = await createKernelRuntime(resolved.kernel?.transport ?? "unix", socketPath, tracePath);
@@ -70,7 +74,11 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
       mention_aliases: channel.mention_aliases,
       history_limit: channel.history_limit,
     }));
-    const agents = agentConfigs.map((agent) => createDaemonAgent(agent, resolved, workspaceUri, shellUri, calculatorUri));
+    const agents = agentConfigs.map((agent) => createDaemonAgent(agent, resolved, registryUri, workspaceUri, shellUri, calculatorUri, memoryUri));
+    const registry = createSlockRegistry({
+      uri: registryUri,
+      endpoints: registryEndpoints(resolved, humanUri, resolved.ui_uri, channelConfigs, agentConfigs, workspaceUri, shellUri, calculatorUri, memoryUri),
+    });
 
     bridge = createSlockUiBridge({
       uri: resolved.ui_uri,
@@ -84,7 +92,7 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
       human_endpoint: human,
     });
 
-    const nodes: IpcNode[] = [human.node, bridge.node, ...channels.map((channel) => channel.node), ...agents.map((agent) => agent.node)];
+    const nodes: IpcNode[] = [registry.node, human.node, bridge.node, ...channels.map((channel) => channel.node), ...agents.map((agent) => agent.node)];
     if (resolved.plugins?.workspace?.enabled) {
       nodes.push(createWorkspacePlugin({
         uri: workspaceUri,
@@ -105,6 +113,16 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
     }
     if (resolved.plugins?.calculator?.enabled) {
       nodes.push(createCalculatorPlugin({ uri: calculatorUri }).node);
+    }
+    if (resolved.plugins?.memory?.enabled) {
+      nodes.push(createReMeMemoryPlugin({
+        uri: memoryUri,
+        provider: resolved.plugins.memory.provider,
+        base_url: required(resolved.plugins.memory.base_url, "plugins.memory.base_url"),
+        workspace_id: resolved.plugins.memory.workspace_id,
+        timeout_ms: resolved.plugins.memory.timeout_ms,
+        grant_store: grantStore,
+      }).node);
     }
 
     for (const node of nodes) {
@@ -128,6 +146,7 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
       socket_path: socketPath,
       trace_path: tracePath,
       ipc_address: ipcAddress,
+      registry_uri: registryUri,
       agent_uri: agentUri,
       agent_uris: agentUris,
       channel_uri: channelUri,
@@ -176,9 +195,11 @@ async function closeDaemon(bridge: SlockUiBridge | undefined, nodes: IpcNode[], 
 function createDaemonAgent(
   agent: SlockWebAgentConfig,
   config: SlockWebDaemonConfig,
+  registryUri: string,
   workspaceUri: string,
   shellUri: string,
   calculatorUri: string,
+  memoryUri: string,
 ): { node: IpcNode } {
   const uri = required(agent.uri, "agents[].uri");
   if (agent.mode === "mock") {
@@ -196,10 +217,13 @@ function createDaemonAgent(
     system_prompt: agent.system_prompt,
     context_history_limit: agent.context_history_limit,
     context_history_scope: agent.context_history_scope,
+    memory: memoryContextConfig(config, memoryUri),
     ...createPiSlockTools({
+      registry_uri: registryUri,
       workspace_uri: workspaceUri,
       shell_uri: shellUri,
-      ipc_call_targets: enabledPluginUris(config, workspaceUri, shellUri, calculatorUri),
+      memory_uri: memoryUri,
+      ipc_call_targets: [registryUri, ...enabledPluginUris(config, workspaceUri, shellUri, calculatorUri, memoryUri)],
     }),
   });
 }
@@ -215,12 +239,92 @@ function enabledPluginUris(
   workspaceUri: string,
   shellUri: string,
   calculatorUri: string,
+  memoryUri: string,
 ): string[] {
   return [
     config.plugins?.workspace?.enabled ? workspaceUri : undefined,
     config.plugins?.shell?.enabled ? shellUri : undefined,
     config.plugins?.calculator?.enabled ? calculatorUri : undefined,
+    config.plugins?.memory?.enabled ? memoryUri : undefined,
   ].filter((uri): uri is string => Boolean(uri));
+}
+
+function registryEndpoints(
+  config: SlockWebDaemonConfig,
+  humanUri: string,
+  uiUri: string | undefined,
+  channels: Array<{ uri: string; label?: string; kind?: string }>,
+  agents: SlockWebAgentConfig[],
+  workspaceUri: string,
+  shellUri: string,
+  calculatorUri: string,
+  memoryUri: string,
+): SlockRegistryEndpoint[] {
+  return [
+    config.plugins?.workspace?.enabled
+      ? {
+        uri: workspaceUri,
+        kind: "plugin",
+        label: "workspace",
+        description: "Workspace file discovery, reads, and approved writes.",
+      }
+      : undefined,
+    config.plugins?.shell?.enabled
+      ? {
+        uri: shellUri,
+        kind: "plugin",
+        label: "shell",
+        description: "Approved local shell execution.",
+      }
+      : undefined,
+    config.plugins?.calculator?.enabled
+      ? {
+        uri: calculatorUri,
+        kind: "plugin",
+        label: "calculator",
+        description: "Demo calculator plugin.",
+      }
+      : undefined,
+    config.plugins?.memory?.enabled
+      ? {
+        uri: memoryUri,
+        kind: "plugin",
+        label: "memory",
+        description: "Long-term memory backed by the configured provider.",
+      }
+      : undefined,
+    { uri: humanUri, kind: "human", label: "human", internal: true },
+    uiUri ? { uri: uiUri, kind: "app", label: "Slock UI", internal: true } : undefined,
+    ...channels.map((channel) => ({
+      uri: channel.uri,
+      kind: "channel" as const,
+      label: channel.label ?? channel.kind ?? "channel",
+      internal: true,
+    })),
+    ...agents.map((agent) => ({
+      uri: required(agent.uri, "agents[].uri"),
+      kind: "agent" as const,
+      label: agent.mode ?? "agent",
+      internal: true,
+    })),
+  ].filter((endpoint): endpoint is SlockRegistryEndpoint => Boolean(endpoint));
+}
+
+function memoryContextConfig(config: SlockWebDaemonConfig, memoryUri: string) {
+  const memory = config.plugins?.memory;
+  if (!memory?.enabled || memory.inject_context === false) {
+    return undefined;
+  }
+
+  return {
+    enabled: true,
+    uri: memoryUri,
+    workspace_id: memory.workspace_id,
+    inject_context: memory.inject_context,
+    scopes: memory.scopes,
+    top_k: memory.top_k,
+    timeout_ms: memory.timeout_ms,
+  };
 }
 
 function createMemoryKernelRuntime(tracePath: string): KernelRuntime {

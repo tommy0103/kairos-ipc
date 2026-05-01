@@ -8,7 +8,17 @@ import { EndpointRegistry } from "../packages/kernel/src/registry.ts";
 import { Router } from "../packages/kernel/src/router.ts";
 import { TraceWriter } from "../packages/kernel/src/trace.ts";
 import type { ClientFrame, KernelFrame } from "../packages/protocol/src/index.ts";
-import { createNode, IpcCallError, type IpcTransport } from "../packages/sdk/src/index.ts";
+import {
+  Accepts,
+  Action,
+  createNode,
+  createPluginNode,
+  IpcCallError,
+  Plugin,
+  Returns,
+  z,
+  type IpcTransport,
+} from "../packages/sdk/src/index.ts";
 
 test("SDK wraps echo action CALL and RESOLVE", async () => {
   const context = createContext();
@@ -86,6 +96,111 @@ test("SDK manifest includes action MIME metadata", async () => {
 
   await agent.close();
   await echo.close();
+});
+
+test("SDK validates Zod action schemas and generates typed manifests", async () => {
+  const context = createContext();
+  const agent = createNode("agent://sdk/agent");
+  const math = createNode("plugin://sdk/math");
+
+  math.action(
+    "add",
+    {
+      doc: "Add two numbers.",
+      accepts: "application/json",
+      returns: "application/json",
+      input_name: "AddInput",
+      output_name: "AddOutput",
+      input: z.object({
+        left: z.number().describe("Left addend."),
+        right: z.number().describe("Right addend."),
+      }),
+      output: z.object({
+        sum: z.number().describe("Computed sum."),
+      }),
+      examples: [{ left: 1, right: 2 }],
+    },
+    async ({ input, payload }) => {
+      assert.deepEqual(payload.data, input);
+      return { sum: input.left + input.right };
+    },
+  );
+
+  await agent.connect(context.createTransport("agent"));
+  await math.connect(context.createTransport("math"));
+
+  const manifest = await agent.call("plugin://sdk/math", "manifest", {
+    mime_type: "application/json",
+    data: {},
+  });
+  assert.match(String(manifest.data), /export interface AddInput/);
+  assert.match(String(manifest.data), /Left addend\./);
+  assert.match(String(manifest.data), /add\(payload: AddInput\): AddOutput/);
+  assert.match(String(manifest.data), /@example \{"left":1,"right":2\}/);
+
+  const result = await agent.call("plugin://sdk/math", "add", {
+    mime_type: "application/json",
+    data: { left: 2, right: 3 },
+  });
+  assert.deepEqual(result, { mime_type: "application/json", data: { sum: 5 } });
+
+  await assert.rejects(
+    agent.call("plugin://sdk/math", "add", {
+      mime_type: "application/json",
+      data: { left: "2", right: 3 },
+    }),
+    (error) => {
+      assert.ok(error instanceof IpcCallError);
+      assert.equal(error.code, "PAYLOAD_INVALID");
+      assert.match(error.message, /left/);
+      return true;
+    },
+  );
+
+  await agent.close();
+  await math.close();
+});
+
+test("SDK registers decorated plugin actions", async () => {
+  const context = createContext();
+  const agent = createNode("agent://sdk/agent");
+
+  class CronService {
+    async tick(payload: { expr: string }): Promise<{ timestamp: number }> {
+      return { timestamp: payload.expr.length };
+    }
+  }
+
+  Plugin("plugin://system/cron")(CronService);
+  const descriptor = Object.getOwnPropertyDescriptor(CronService.prototype, "tick")!;
+  Returns("application/json")(CronService.prototype, "tick", descriptor);
+  Accepts("application/json")(CronService.prototype, "tick", descriptor);
+  Action("tick", {
+    doc: "Evaluate one cron tick request.",
+    input: z.object({ expr: z.string().min(1).describe("Cron expression.") }),
+    output: z.object({ timestamp: z.number().describe("Synthetic timestamp for this test.") }),
+  })(CronService.prototype, "tick", descriptor);
+
+  const cron = createPluginNode(new CronService());
+
+  await agent.connect(context.createTransport("agent"));
+  await cron.connect(context.createTransport("cron"));
+
+  const manifest = await agent.call("plugin://system/cron", "manifest", {
+    mime_type: "application/json",
+    data: {},
+  });
+  assert.match(String(manifest.data), /tick\(payload: TickInput\): TickOutput/);
+  assert.match(String(manifest.data), /Cron expression\./);
+
+  const result = await agent.call("plugin://system/cron", "tick", {
+    mime_type: "application/json",
+    data: { expr: "* * * * *" },
+  });
+  assert.deepEqual(result, { mime_type: "application/json", data: { timestamp: 9 } });
+
+  await agent.close();
+  await cron.close();
 });
 
 test("SDK rejects missing actions as REJECT envelopes", async () => {
@@ -374,6 +489,50 @@ test("SDK treats EMIT, END, and CANCEL as stream subscription flow", async () =>
   await ticker.close();
   await upper.close();
   await agent.close();
+});
+
+test("SDK converts async generator action results into EMIT and END", async () => {
+  const context = createContext();
+  const agent = createNode("agent://sdk/agent");
+  const ticker = createNode("plugin://sdk/ticker");
+  const emitted: number[] = [];
+  const ended: unknown[] = [];
+
+  ticker.action(
+    "tick",
+    {
+      accepts: "application/json",
+      returns: "application/json",
+      input: z.object({ expr: z.string().min(1) }),
+      output: z.object({ timestamp: z.number() }),
+    },
+    async function* ({ input }) {
+      yield { timestamp: input.expr.length };
+      yield { timestamp: input.expr.length + 1 };
+    },
+  );
+
+  agent.onEmit("tick", (payload) => {
+    emitted.push((payload.data as { timestamp: number }).timestamp);
+  });
+  agent.onEnd("tick", (payload) => {
+    ended.push(payload.data);
+  });
+
+  await agent.connect(context.createTransport("agent"));
+  await ticker.connect(context.createTransport("ticker"));
+
+  const result = await agent.call("plugin://sdk/ticker", "tick", {
+    mime_type: "application/json",
+    data: { expr: "*/5 * * * *" },
+  });
+
+  assert.deepEqual(emitted, [11, 12]);
+  assert.deepEqual(ended, [null]);
+  assert.deepEqual(result, { mime_type: "application/json", data: null });
+
+  await agent.close();
+  await ticker.close();
 });
 
 function createContext() {

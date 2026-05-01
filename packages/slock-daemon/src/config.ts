@@ -5,6 +5,8 @@ import type { MentionAliases } from "../../slock-channel/src/index.ts";
 
 export type SlockWebAgentMode = "pi" | "mock";
 export type SlockWebChannelKind = "channel" | "dm";
+export type SlockMemoryProvider = "reme-http";
+export type SlockMemoryScope = "personal" | "task" | "tool";
 
 export interface SlockWebAgentConfig {
   mode?: SlockWebAgentMode;
@@ -70,6 +72,18 @@ export interface SlockWebDaemonConfig {
       enabled?: boolean;
       uri?: EndpointUri;
     };
+    memory?: {
+      enabled?: boolean;
+      uri?: EndpointUri;
+      provider?: SlockMemoryProvider;
+      base_url?: string;
+      base_url_env?: string;
+      workspace_id?: string;
+      inject_context?: boolean;
+      scopes?: SlockMemoryScope[];
+      top_k?: number;
+      timeout_ms?: number;
+    };
   };
   approval?: {
     auto_approve?: boolean;
@@ -85,7 +99,8 @@ export interface LoadSlockWebDaemonConfigOptions {
 
 export const DEFAULT_PI_SYSTEM_PROMPT = [
   "You are pi-assistant running behind Slock IPC.",
-  "Use ipc_call for all plugin actions: inspect manifest first when unsure, then call target/action with structured payload.",
+  "Use ipc_call for plugin actions: call slock://registry list_endpoints to discover mounted endpoints, then call an endpoint's manifest before endpoint-specific actions.",
+  "Do not set ipc_call timeout_ms or ttl_ms casually; leave them unset unless the user asks for a limit, the manifest requires it, or a previous default wait timed out.",
   "For repo/workspace questions, use ipc_call against plugin://local/workspace list/search/read before considering shell execution.",
   "Workspace write/edit and shell exec are high-risk; ipc_call will request human approval before forwarding those actions.",
   "Keep final answers concise and mention which files or commands were used.",
@@ -126,6 +141,8 @@ export function resolveSlockWebDaemonConfig(config: Partial<SlockWebDaemonConfig
   const workspaceUri = config.plugins?.workspace?.uri ?? "plugin://local/workspace";
   const shellUri = config.plugins?.shell?.uri ?? "plugin://local/shell";
   const calculatorUri = config.plugins?.calculator?.uri ?? "plugin://demo/calculator";
+  const memoryUri = config.plugins?.memory?.uri ?? "plugin://memory/reme";
+  const memoryBaseUrl = config.plugins?.memory?.base_url ?? readEnv(config.plugins?.memory?.base_url_env);
   const mentionAliases = config.channel?.mention_aliases ?? defaultMentionAliases(agents);
   const channels = normalizeChannels(config, mentionAliases);
   const channelUri = channels[0]?.uri ?? "app://slock/channel/general";
@@ -166,6 +183,18 @@ export function resolveSlockWebDaemonConfig(config: Partial<SlockWebDaemonConfig
       calculator: {
         enabled: config.plugins?.calculator?.enabled ?? hasAgentMode(agents, "mock"),
         uri: calculatorUri,
+      },
+      memory: {
+        enabled: config.plugins?.memory?.enabled ?? Boolean(memoryBaseUrl),
+        uri: memoryUri,
+        provider: config.plugins?.memory?.provider ?? "reme-http",
+        base_url: memoryBaseUrl,
+        base_url_env: config.plugins?.memory?.base_url_env,
+        workspace_id: config.plugins?.memory?.workspace_id ?? "kairos-ipc",
+        inject_context: config.plugins?.memory?.inject_context ?? true,
+        scopes: config.plugins?.memory?.scopes ?? ["personal", "task"],
+        top_k: config.plugins?.memory?.top_k ?? 5,
+        timeout_ms: config.plugins?.memory?.timeout_ms ?? 120000,
       },
     },
     approval: {
@@ -249,6 +278,13 @@ function configFromCliAndEnv(argv: string[], env: Record<string, string | undefi
       api_key_env: readOption(argv, "--api-key-env"),
       base_url: readOption(argv, "--base-url") ?? env.KAIROS_IPC_PI_BASE_URL ?? env.OPENAI_BASE_URL,
       base_url_env: readOption(argv, "--base-url-env"),
+    },
+    plugins: {
+      memory: {
+        uri: readOption(argv, "--memory-uri") as EndpointUri | undefined,
+        base_url: readOption(argv, "--reme-base-url") ?? env.KAIROS_IPC_REME_BASE_URL,
+        workspace_id: readOption(argv, "--memory-workspace") ?? env.KAIROS_IPC_MEMORY_WORKSPACE_ID,
+      },
     },
   };
 }
@@ -352,6 +388,10 @@ function readNumberOption(argv: string[], name: string): number | undefined {
   }
   const value = Number(raw);
   return Number.isFinite(value) ? value : undefined;
+}
+
+function readEnv(name: string | undefined): string | undefined {
+  return name ? process.env[name] : undefined;
 }
 
 function mergeRecord(left: Record<string, unknown>, right: Record<string, unknown>): Record<string, unknown> {

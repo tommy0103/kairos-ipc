@@ -17,6 +17,7 @@
     "node": ">=25.0.0"
   },
   "dependencies": {
-    "@mariozechner/pi-ai": "^0.70.6"
+    "@mariozechner/pi-ai": "^0.70.6",
+    "zod": "^4.4.1"
   }
 }

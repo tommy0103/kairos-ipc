@@ -12,6 +12,7 @@ import { TraceWriter } from "../packages/kernel/src/trace.ts";
 import { createCalculatorPlugin, createShellPlugin, createWorkspacePlugin } from "../packages/plugins-demo/src/index.ts";
 import type { ClientFrame, KernelFrame } from "../packages/protocol/src/index.ts";
 import { createNode, type IpcTransport } from "../packages/sdk/src/index.ts";
+import { createSlockRegistry } from "../packages/slock-daemon/src/index.ts";
 import {
   createSlockChannel,
   createSlockGrantStore,
@@ -285,14 +286,159 @@ test("pi-ai agent adapter can scope context to a Slock thread", async () => {
   }
 });
 
-test("pi-ai generic ipc_call tool can inspect a manifest and call a plugin action", async () => {
+test("pi-ai agent adapter injects retrieved long-term memory context", async () => {
+  const pi = registerFauxProvider({ tokensPerSecond: 1000 });
+  const memoryRequests: Array<Record<string, unknown>> = [];
+  pi.setResponses([
+    (context) => {
+      assert.match(context.systemPrompt ?? "", /Long-term memory is available/);
+      assert.match(context.systemPrompt ?? "", /Relevant long-term memory/);
+      assert.match(context.systemPrompt ?? "", /concise Chinese answers/);
+      return fauxAssistantMessage(fauxText("Memory context was available."));
+    },
+  ]);
+
+  const ipc = createContext();
+  const human = createNode("human://user/local");
+  const channel = createSlockChannel({ uri: "app://slock/channel/general" });
+  const memory = createNode("plugin://memory/reme");
+  memory.action("retrieve", { accepts: "application/json", returns: "application/json" }, async (payload) => {
+    memoryRequests.push(payload.data as Record<string, unknown>);
+    return {
+      mime_type: "application/json",
+      data: { memories: ["User prefers concise Chinese answers."] },
+    };
+  });
+  const agent = createPiAgent({
+    uri: "agent://local/pi-assistant",
+    model: pi.getModel(),
+    system_prompt: "You are a concise Slock assistant.",
+    memory: {
+      enabled: true,
+      uri: "plugin://memory/reme",
+      workspace_id: "kairos-ipc",
+      scopes: ["personal"],
+      top_k: 2,
+    },
+  });
+  const events: SlockChannelEvent[] = [];
+
+  human.onEmit("*", (payload) => {
+    if (payload.mime_type === SLOCK_CHANNEL_EVENT_MIME) {
+      events.push(payload.data as SlockChannelEvent);
+    }
+  });
+
+  try {
+    await human.connect(ipc.createTransport("human"));
+    await channel.node.connect(ipc.createTransport("channel"));
+    await memory.connect(ipc.createTransport("memory"));
+    await agent.node.connect(ipc.createTransport("agent"));
+
+    await human.call("app://slock/channel/general", "subscribe", { mime_type: "application/json", data: {} });
+    await human.call("app://slock/channel/general", "post_message", {
+      mime_type: SLOCK_MESSAGE_MIME,
+      data: { text: "@pi how should you answer?", mentions: ["agent://local/pi-assistant"], thread_id: null },
+    });
+
+    await waitFor(() => events.some((event) => event.type === "message_created" && event.message?.kind === "agent"));
+    assert.equal(memoryRequests.length, 1);
+    assert.equal(memoryRequests[0]?.scope, "personal");
+    assert.equal(memoryRequests[0]?.workspace_id, "kairos-ipc");
+    assert.equal(memoryRequests[0]?.query, "how should you answer?");
+  } finally {
+    await human.close();
+    await channel.node.close();
+    await memory.close();
+    await agent.node.close();
+    pi.unregister();
+  }
+});
+
+test("pi-ai ipc_call tool describes registry and endpoint manifest discovery", () => {
+  const tools = createPiSlockTools({ ipc_call_targets: ["plugin://demo/calculator"] });
+  const tool = tools.tools[0];
+  assert.equal(tool?.name, "ipc_call");
+  assert.match(tool?.description ?? "", /slock:\/\/registry list_endpoints/);
+  assert.match(tool?.description ?? "", /call its manifest action before endpoint-specific actions/);
+  assert.match(tool?.description ?? "", /Leave timeout_ms and ttl_ms unset by default/);
+  assert.match(tool?.description ?? "", /Known useful target URIs: slock:\/\/registry, plugin:\/\/demo\/calculator/);
+  const parameters = JSON.stringify(tool?.parameters);
+  assert.ok(parameters.includes("list_endpoints"));
+  assert.ok(parameters.includes("Do not set casually"));
+});
+
+test("pi-ai ipc_call uses a longer internal wait for memory writes", async () => {
+  const calls: Array<{ target: string; action: string; ttl_ms?: number; timeout_ms?: number }> = [];
+  const tools = createPiSlockTools({
+    memory_uri: "plugin://memory/reme",
+    tool_ttl_ms: 1000,
+    memory_tool_ttl_ms: 123000,
+  });
+
+  const result = await tools.execute_tool(fauxToolCall("ipc_call", {
+    target: "plugin://memory/reme",
+    action: "summarize",
+    payload: { scope: "personal", trajectories: [{ messages: [{ role: "user", content: "User likes apples." }] }] },
+  }, { id: "memory-timeout" }), {
+    input: {
+      channel: "app://slock/channel/general",
+      message_id: "message-1",
+      text: "remember this",
+      sender: "human://user/local",
+    },
+    runtime: {
+      agent_uri: "agent://local/pi-assistant",
+      node: {
+        uri: "agent://local/pi-assistant",
+        call: async (target, action, _payload, options = {}) => {
+          calls.push({ target, action, ttl_ms: options.ttl_ms, timeout_ms: options.timeout_ms });
+          if (action === "request_approval") {
+            return {
+              mime_type: "application/json",
+              data: {
+                approved: true,
+                grant: {
+                  id: "grant-1",
+                  token: "token-1",
+                  source: "agent://local/pi-assistant",
+                  target: "plugin://memory/reme",
+                  actions: ["summarize"],
+                  issued_at: "2026-05-01T00:00:00.000Z",
+                  expires_at: "2026-05-01T00:05:00.000Z",
+                },
+              },
+            };
+          }
+          return { mime_type: "application/json", data: { ok: true } };
+        },
+      },
+    },
+  });
+
+  assert.equal(result.isError, false);
+  const memoryCall = calls.find((call) => call.target === "plugin://memory/reme" && call.action === "summarize");
+  assert.equal(memoryCall?.ttl_ms, 123000);
+  assert.equal(memoryCall?.timeout_ms, 123000);
+});
+
+test("pi-ai generic ipc_call tool can discover endpoints, inspect a manifest, and call a plugin action", async () => {
   const pi = registerFauxProvider({ tokensPerSecond: 1000 });
   pi.setResponses([
     fauxAssistantMessage(fauxToolCall("ipc_call", {
-      target: "plugin://demo/calculator",
-      action: "manifest",
+      target: "slock://registry",
+      action: "list_endpoints",
       payload: {},
-    }, { id: "manifest-1" }), { stopReason: "toolUse" }),
+    }, { id: "registry-1" }), { stopReason: "toolUse" }),
+    (context) => {
+      const registryResult = context.messages.find((message) => message.role === "toolResult" && message.toolCallId === "registry-1");
+      assert.ok(registryResult?.content.some((block) => block.type === "text" && block.text.includes("plugin://demo/calculator")));
+      return fauxAssistantMessage(fauxToolCall("ipc_call", {
+        target: "plugin://demo/calculator",
+        action: "manifest",
+        payload: {},
+      }, { id: "manifest-1" }), { stopReason: "toolUse" });
+    },
     (context) => {
       const manifestResult = context.messages.find((message) => message.role === "toolResult" && message.toolCallId === "manifest-1");
       assert.ok(manifestResult?.content.some((block) => block.type === "text" && block.text.includes("interface Calculator")));
@@ -320,6 +466,9 @@ test("pi-ai generic ipc_call tool can inspect a manifest and call a plugin actio
     tools: tools.tools,
     execute_tool: tools.execute_tool,
   });
+  const registry = createSlockRegistry({
+    endpoints: [{ uri: "plugin://demo/calculator", kind: "plugin", label: "calculator" }],
+  });
   const calculator = createCalculatorPlugin({ uri: "plugin://demo/calculator" });
   const events: SlockChannelEvent[] = [];
 
@@ -333,6 +482,7 @@ test("pi-ai generic ipc_call tool can inspect a manifest and call a plugin actio
     await human.connect(ipc.createTransport("human"));
     await channel.node.connect(ipc.createTransport("channel"));
     await agent.node.connect(ipc.createTransport("agent"));
+    await registry.node.connect(ipc.createTransport("registry"));
     await calculator.node.connect(ipc.createTransport("calculator"));
 
     await human.call("app://slock/channel/general", "subscribe", { mime_type: "application/json", data: {} });
@@ -348,6 +498,7 @@ test("pi-ai generic ipc_call tool can inspect a manifest and call a plugin actio
     await human.close();
     await channel.node.close();
     await agent.node.close();
+    await registry.node.close();
     await calculator.node.close();
     pi.unregister();
   }
@@ -665,6 +816,78 @@ test("pi-ai ipc_call edit and exec require approval", async () => {
     await agent.node.close();
     await workspace.node.close();
     await shell.node.close();
+    pi.unregister();
+  }
+});
+
+test("pi-ai ipc_call memory writes require approval", async () => {
+  let approvals = 0;
+  let memoryPayload: Record<string, unknown> | undefined;
+  const pi = registerFauxProvider({ tokensPerSecond: 1000 });
+  const grantStore = createSlockGrantStore();
+  pi.setResponses([
+    fauxAssistantMessage(fauxToolCall("ipc_call", {
+      target: "plugin://memory/reme",
+      action: "summarize",
+      payload: { scope: "task", trajectories: [] },
+    }, { id: "memory-1" }), { stopReason: "toolUse" }),
+    (context) => {
+      const result = context.messages.find((message) => message.role === "toolResult" && message.toolCallId === "memory-1");
+      assert.ok(result?.content.some((block) => block.type === "text" && block.text.includes('"ok": true')));
+      return fauxAssistantMessage(fauxText("Memory summarize completed after approval."));
+    },
+  ]);
+
+  const ipc = createContext();
+  const human = createSlockHuman({
+    uri: "human://user/local",
+    grant_store: grantStore,
+    auto_approval: async () => {
+      approvals++;
+      return { approved: true, grant_ttl_ms: 60000 };
+    },
+  });
+  const channel = createSlockChannel({ uri: "app://slock/channel/general" });
+  const tools = createPiSlockTools({ memory_uri: "plugin://memory/reme", ipc_call_targets: ["plugin://memory/reme"] });
+  const agent = createPiAgent({
+    uri: "agent://local/pi-assistant",
+    model: pi.getModel(),
+    tools: tools.tools,
+    execute_tool: tools.execute_tool,
+  });
+  const memory = createNode("plugin://memory/reme");
+  memory.action("summarize", { accepts: "application/json", returns: "application/json" }, async (payload) => {
+    memoryPayload = payload.data as Record<string, unknown>;
+    return { mime_type: "application/json", data: { ok: true } };
+  });
+  const events: SlockChannelEvent[] = [];
+
+  human.node.onEmit("*", (payload) => {
+    if (payload.mime_type === SLOCK_CHANNEL_EVENT_MIME) {
+      events.push(payload.data as SlockChannelEvent);
+    }
+  });
+
+  try {
+    await human.node.connect(ipc.createTransport("human"));
+    await channel.node.connect(ipc.createTransport("channel"));
+    await agent.node.connect(ipc.createTransport("agent"));
+    await memory.connect(ipc.createTransport("memory"));
+
+    await human.node.call("app://slock/channel/general", "subscribe", { mime_type: "application/json", data: {} });
+    await human.node.call("app://slock/channel/general", "post_message", {
+      mime_type: SLOCK_MESSAGE_MIME,
+      data: { text: "@pi remember this task decision", mentions: ["agent://local/pi-assistant"], thread_id: null },
+    });
+
+    await waitFor(() => events.some((event) => event.type === "message_created" && event.message?.kind === "agent"));
+    assert.equal(approvals, 1);
+    assert.ok(memoryPayload?.approval_grant);
+  } finally {
+    await human.node.close();
+    await channel.node.close();
+    await agent.node.close();
+    await memory.close();
     pi.unregister();
   }
 });

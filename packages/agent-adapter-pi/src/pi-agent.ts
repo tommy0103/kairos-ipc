@@ -25,6 +25,18 @@ export type PiToolExecutor = (
   context: PiToolExecutionContext,
 ) => ToolResultMessage | Promise<ToolResultMessage>;
 
+export type PiMemoryScope = "personal" | "task" | "tool";
+
+export interface PiMemoryContextOptions {
+  enabled?: boolean;
+  uri?: EndpointUri;
+  workspace_id?: string;
+  inject_context?: boolean;
+  scopes?: PiMemoryScope[];
+  top_k?: number;
+  timeout_ms?: number;
+}
+
 export interface PiRuntimeOptions<TApi extends Api = Api> {
   model: Model<TApi>;
   api_key?: string;
@@ -38,6 +50,7 @@ export interface PiRuntimeOptions<TApi extends Api = Api> {
   max_tool_turns?: number;
   context_history_limit?: number;
   context_history_scope?: "channel" | "thread";
+  memory?: PiMemoryContextOptions;
   stream_options?: ProviderStreamOptions;
   build_context?: (input: SlockAgentRun, context: AgentRuntimeContext) => Context | Promise<Context>;
 }
@@ -251,12 +264,83 @@ async function buildContext<TApi extends Api>(
   }
 
   const messages = await buildHistoryMessages(input, context, options);
+  const memory = await retrieveMemoryContext(input, context, options.memory);
 
   return {
-    systemPrompt: options.system_prompt,
+    systemPrompt: buildSystemPrompt(options.system_prompt, options.memory, memory),
     messages,
     tools: options.tools,
   };
+}
+
+async function retrieveMemoryContext(
+  input: SlockAgentRun,
+  context: AgentRuntimeContext,
+  options: PiMemoryContextOptions | undefined,
+): Promise<string[]> {
+  if (!isMemoryContextEnabled(options)) {
+    return [];
+  }
+
+  const uri = options.uri ?? "plugin://memory/reme";
+  const scopes = options.scopes && options.scopes.length > 0 ? options.scopes : ["personal", "task"];
+  const query = stripMentions(input.text) || input.text;
+  const topK = options.top_k ?? 5;
+  const timeoutMs = options.timeout_ms ?? 5000;
+  const memories: string[] = [];
+
+  for (const scope of scopes) {
+    if (context.signal?.aborted) {
+      return memories;
+    }
+
+    try {
+      const result = await context.node.call<Record<string, unknown>, Record<string, unknown>>(uri, "retrieve", {
+        mime_type: "application/json",
+        data: {
+          scope,
+          query,
+          top_k: topK,
+          ...(options.workspace_id ? { workspace_id: options.workspace_id } : {}),
+        },
+      }, { ttl_ms: timeoutMs, timeout_ms: timeoutMs, signal: context.signal });
+
+      for (const memory of extractMemoryStrings(result.data)) {
+        memories.push(`${scope}: ${memory}`);
+      }
+    } catch {
+      // Memory is helpful context, not a hard dependency for answering.
+    }
+  }
+
+  return uniqueStrings(memories).slice(0, Math.max(topK * scopes.length, topK));
+}
+
+function buildSystemPrompt(
+  basePrompt: string | undefined,
+  memoryOptions: PiMemoryContextOptions | undefined,
+  memories: string[],
+): string | undefined {
+  const parts = [basePrompt?.trim()].filter((part): part is string => Boolean(part));
+
+  if (memoryOptions?.enabled) {
+    const uri = memoryOptions.uri ?? "plugin://memory/reme";
+    parts.push([
+      `Long-term memory is available through ipc_call target ${uri}.`,
+      "Use retrieve for user preferences, project history, or prior decisions when the injected context is insufficient.",
+      "Inspect the memory endpoint manifest before writing memory in a run; use summarize for personal/task memories, reserve record_tool_result for actual tool-call outcomes, and use vector_store only for administrative operations. Memory writes require approval.",
+    ].join(" "));
+  }
+
+  if (memories.length > 0) {
+    parts.push(`Relevant long-term memory:\n${memories.map((memory) => `- ${clipMemory(memory)}`).join("\n")}`);
+  }
+
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
+function isMemoryContextEnabled(options: PiMemoryContextOptions | undefined): options is PiMemoryContextOptions {
+  return Boolean(options?.enabled && options.inject_context !== false);
 }
 
 async function buildHistoryMessages<TApi extends Api>(
@@ -342,6 +426,43 @@ function stripMentions(text: string): string {
   return text.replace(/(^|\s)@\S+/g, " ").trim();
 }
 
+function extractMemoryStrings(value: unknown): string[] {
+  if (typeof value === "string") {
+    return value.trim().length > 0 ? [value.trim()] : [];
+  }
+
+  if (Array.isArray(value)) {
+    return value.flatMap(extractMemoryStrings);
+  }
+
+  if (!isRecord(value)) {
+    return [];
+  }
+
+  for (const key of ["memories", "memory", "results", "result", "data", "content", "guidelines", "summary", "raw"]) {
+    if (Object.hasOwn(value, key)) {
+      const extracted = extractMemoryStrings(value[key]);
+      if (extracted.length > 0) {
+        return extracted;
+      }
+    }
+  }
+
+  if (typeof value.text === "string") {
+    return [value.text.trim()].filter(Boolean);
+  }
+
+  return [];
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+}
+
+function clipMemory(value: string): string {
+  return value.length > 500 ? `${value.slice(0, 497)}...` : value;
+}
+
 function assistantText(message: AssistantMessage): string {
   return message.content.filter(isTextContent).map((block) => block.text).join("").trim();
 }
@@ -372,4 +493,8 @@ function isTextContent(block: AssistantMessage["content"][number]): block is Tex
 
 function isToolCall(block: AssistantMessage["content"][number]): block is ToolCall {
   return block.type === "toolCall";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -11,12 +11,15 @@ import {
 import type { PiToolExecutor, PiToolExecutionContext } from "./pi-agent.ts";
 
 export interface PiSlockToolsOptions {
+  registry_uri?: EndpointUri;
   workspace_uri?: EndpointUri;
   shell_uri?: EndpointUri;
+  memory_uri?: EndpointUri;
   approval_uri?: EndpointUri;
   generic_ipc_call?: boolean;
   ipc_call_targets?: EndpointUri[];
   tool_ttl_ms?: number;
+  memory_tool_ttl_ms?: number;
   approval_ttl_ms?: number;
 }
 
@@ -30,13 +33,16 @@ const IPC_CALL_TOOL = "ipc_call";
 type ApprovalOutcome = { grant: SlockCapabilityGrant } | { error: ToolResultMessage };
 
 export function createPiSlockTools(options: PiSlockToolsOptions = {}): PiSlockTools {
+  const registryUri = options.registry_uri ?? "slock://registry";
   const workspaceUri = options.workspace_uri ?? "plugin://local/workspace";
   const shellUri = options.shell_uri ?? "plugin://local/shell";
+  const memoryUri = options.memory_uri ?? "plugin://memory/reme";
   const toolTtlMs = options.tool_ttl_ms ?? 30000;
+  const memoryToolTtlMs = options.memory_tool_ttl_ms ?? 120000;
   const approvalTtlMs = options.approval_ttl_ms ?? 300000;
 
   return {
-    tools: createTools(options, workspaceUri, shellUri),
+    tools: createTools(options, registryUri, workspaceUri, shellUri, memoryUri),
     execute_tool: async (toolCall, context) => {
       try {
         return await executeTool(toolCall, context);
@@ -65,12 +71,13 @@ export function createPiSlockTools(options: PiSlockToolsOptions = {}): PiSlockTo
       return approval.error;
     }
 
+    const defaultTtlMs = defaultToolTtlMs(args, memoryUri, toolTtlMs, memoryToolTtlMs);
     const result = await context.runtime.node.call(args.target, args.action, {
       mime_type: args.mime_type,
       data: approval.payload,
     }, {
-      ttl_ms: args.ttl_ms ?? toolTtlMs,
-      timeout_ms: args.timeout_ms ?? args.ttl_ms ?? toolTtlMs,
+      ttl_ms: args.ttl_ms ?? defaultTtlMs,
+      timeout_ms: args.timeout_ms ?? args.ttl_ms ?? defaultTtlMs,
       signal: context.runtime.signal,
     });
 
@@ -86,7 +93,7 @@ export function createPiSlockTools(options: PiSlockToolsOptions = {}): PiSlockTo
     context: PiToolExecutionContext,
     args: IpcCallArgs,
   ): Promise<{ payload: unknown } | { error: ToolResultMessage }> {
-    const request = createApprovalRequestForIpcCall(args, workspaceUri, shellUri);
+    const request = createApprovalRequestForIpcCall(args, workspaceUri, shellUri, memoryUri);
     if (!request) {
       return { payload: args.payload };
     }
@@ -169,21 +176,27 @@ interface IpcCallArgs {
   timeout_ms?: number;
 }
 
-function createTools(options: PiSlockToolsOptions, workspaceUri: EndpointUri, shellUri: EndpointUri): Tool[] {
+function createTools(
+  options: PiSlockToolsOptions,
+  registryUri: EndpointUri,
+  workspaceUri: EndpointUri,
+  shellUri: EndpointUri,
+  memoryUri: EndpointUri,
+): Tool[] {
   if (options.generic_ipc_call === false) {
     return [];
   }
 
   return [{
     name: IPC_CALL_TOOL,
-    description: ipcCallDescription(options, workspaceUri, shellUri),
+    description: ipcCallDescription(options, registryUri, workspaceUri, shellUri, memoryUri),
     parameters: Type.Object({
-      target: Type.String({ description: "Target endpoint URI, for example plugin://local/workspace." }),
-      action: Type.String({ description: "Target action name, for example manifest, list, read, write, edit, or exec." }),
+      target: Type.String({ description: "Target endpoint URI, for example slock://registry or plugin://local/workspace." }),
+      action: Type.String({ description: "Target action name, for example list_endpoints, manifest, list, read, write, edit, or exec." }),
       mime_type: Type.Optional(Type.String({ description: "Payload MIME type. Defaults to application/json, except known non-JSON actions such as shell exec." })),
       payload: Type.Optional(Type.Any({ description: "Value to send as payload.data, or an EnvelopePayload object with mime_type and data." })),
-      ttl_ms: Type.Optional(Type.Number({ description: "Optional call TTL in milliseconds." })),
-      timeout_ms: Type.Optional(Type.Number({ description: "Optional local wait timeout in milliseconds." })),
+      ttl_ms: Type.Optional(Type.Number({ description: "Optional call TTL in milliseconds. Leave unset unless the user or manifest explicitly needs a custom limit." })),
+      timeout_ms: Type.Optional(Type.Number({ description: "Optional local wait timeout in milliseconds. Do not set casually; prefer the default unless the user requested a limit, the manifest says the action is long-running, or a previous default timeout failed." })),
     }),
   }];
 }
@@ -231,6 +244,7 @@ function createApprovalRequestForIpcCall(
   args: IpcCallArgs,
   workspaceUri: EndpointUri,
   shellUri: EndpointUri,
+  memoryUri: EndpointUri,
 ): SlockApprovalRequest | undefined {
   if (args.target === workspaceUri && args.action === "write") {
     return {
@@ -259,6 +273,33 @@ function createApprovalRequestForIpcCall(
     };
   }
 
+  if (args.target === memoryUri && args.action === "summarize") {
+    return {
+      risk: "memory_write",
+      summary: memorySummary(args.payload, "Summarize long-term memory"),
+      proposed_call: { target: args.target, action: args.action, payload: args.payload },
+      metadata: { ipc_target: args.target, ipc_action: args.action },
+    };
+  }
+
+  if (args.target === memoryUri && args.action === "record_tool_result") {
+    return {
+      risk: "memory_write",
+      summary: "Record tool result in long-term memory",
+      proposed_call: { target: args.target, action: args.action, payload: args.payload },
+      metadata: { ipc_target: args.target, ipc_action: args.action },
+    };
+  }
+
+  if (args.target === memoryUri && args.action === "vector_store") {
+    return {
+      risk: "memory_admin",
+      summary: memorySummary(args.payload, "Run memory vector-store operation"),
+      proposed_call: { target: args.target, action: args.action, payload: args.payload },
+      metadata: { ipc_target: args.target, ipc_action: args.action },
+    };
+  }
+
   return undefined;
 }
 
@@ -280,6 +321,14 @@ function isNonZeroShellResult(args: IpcCallArgs, data: unknown): boolean {
     && data.exit_code !== 0;
 }
 
+function defaultToolTtlMs(args: IpcCallArgs, memoryUri: EndpointUri, toolTtlMs: number, memoryToolTtlMs: number): number {
+  return args.target === memoryUri && isMemoryWriteAction(args.action) ? memoryToolTtlMs : toolTtlMs;
+}
+
+function isMemoryWriteAction(action: string): boolean {
+  return action === "summarize" || action === "record_tool_result" || action === "vector_store";
+}
+
 function payloadPath(payload: unknown): string | undefined {
   return isRecord(payload) && typeof payload.path === "string" ? payload.path : undefined;
 }
@@ -290,6 +339,24 @@ function shellSummary(payload: unknown): string {
   }
   const args = Array.isArray(payload.args) ? payload.args.filter((item): item is string => typeof item === "string") : [];
   return `Run ${payload.command}${args.length > 0 ? ` ${args.join(" ")}` : ""}`;
+}
+
+function memorySummary(payload: unknown, fallback: string): string {
+  if (!isRecord(payload)) {
+    return fallback;
+  }
+  const scope = typeof payload.scope === "string" ? payload.scope : undefined;
+  const operation = typeof payload.operation === "string" ? payload.operation : undefined;
+  if (scope && operation) {
+    return `${fallback}: ${scope}/${operation}`;
+  }
+  if (scope) {
+    return `${fallback}: ${scope}`;
+  }
+  if (operation) {
+    return `${fallback}: ${operation}`;
+  }
+  return fallback;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -319,13 +386,24 @@ function readOptionalString(value: Record<string, unknown>, key: string): string
   return typeof next === "string" && next.trim().length > 0 ? next : undefined;
 }
 
-function ipcCallDescription(options: PiSlockToolsOptions, workspaceUri: EndpointUri, shellUri: EndpointUri): string {
-  const targets = uniqueEndpointUris(options.ipc_call_targets ?? [workspaceUri, shellUri]);
+function ipcCallDescription(
+  options: PiSlockToolsOptions,
+  registryUri: EndpointUri,
+  workspaceUri: EndpointUri,
+  shellUri: EndpointUri,
+  memoryUri: EndpointUri,
+): string {
+  const targets = uniqueEndpointUris([registryUri, ...(options.ipc_call_targets ?? [workspaceUri, shellUri, memoryUri])]);
   const targetHint = targets.length > 0 ? ` Known useful target URIs: ${targets.join(", ")}.` : "";
   return [
     "Call IPC endpoint actions through a single CALL/RESOLVE request; all plugin work should go through this tool.",
+    `Use ${registryUri} list_endpoints to discover mounted endpoints before choosing a plugin URI.`,
+    "For an endpoint you have not inspected in this run, call its manifest action before endpoint-specific actions and follow the manifest payload notes.",
+    "Leave timeout_ms and ttl_ms unset by default; only set them when the user asks for a specific limit, the manifest requires it, or a previous default wait timed out. Memory writes have a longer internal default wait.",
     `Use ${workspaceUri} manifest/list/search/read for workspace discovery and file reads.`,
+    `Use ${memoryUri} retrieve for long-term memory when user preferences, project history, or prior decisions matter.`,
     "For workspace write/edit and shell exec, this tool requests human approval and attaches the returned capability grant before forwarding the IPC call.",
+    "Memory summarize, record_tool_result, and vector_store also request human approval before forwarding.",
     targetHint,
   ].join(" ").trim();
 }

@@ -8,9 +8,10 @@ import type { Connection } from "../packages/kernel/src/registry.ts";
 import { EndpointRegistry } from "../packages/kernel/src/registry.ts";
 import { Router } from "../packages/kernel/src/router.ts";
 import { TraceWriter } from "../packages/kernel/src/trace.ts";
-import { createCalculatorPlugin, createShellPlugin, createWorkspacePlugin } from "../packages/plugins-demo/src/index.ts";
+import { createCalculatorPlugin, createReMeMemoryPlugin, createShellPlugin, createWorkspacePlugin } from "../packages/plugins-demo/src/index.ts";
 import type { ClientFrame, KernelFrame } from "../packages/protocol/src/index.ts";
 import { createNode, IpcCallError, type IpcTransport } from "../packages/sdk/src/index.ts";
+import { createSlockRegistry } from "../packages/slock-daemon/src/index.ts";
 import {
   createSlockChannel,
   createSlockGrantStore,
@@ -22,6 +23,52 @@ import {
 } from "../packages/slock-channel/src/index.ts";
 import { createSlockHuman } from "../packages/slock-human/src/index.ts";
 import { createSlockUiBridge } from "../packages/slock-ui-bridge/src/index.ts";
+
+test("Slock registry lists mounted endpoints and guides manifest inspection", async () => {
+  const context = createContext();
+  const human = createNode("human://user/local");
+  const registry = createSlockRegistry({
+    endpoints: [
+      { uri: "plugin://local/workspace", kind: "plugin", label: "workspace" },
+      { uri: "plugin://memory/reme", kind: "plugin", label: "memory" },
+      { uri: "agent://local/pi-assistant", kind: "agent", label: "pi", internal: true },
+    ],
+  });
+
+  try {
+    await human.connect(context.createTransport("human"));
+    await registry.node.connect(context.createTransport("registry"));
+
+    const listed = await human.call("slock://registry", "list_endpoints", {
+      mime_type: "application/json",
+      data: {},
+    });
+    const listedData = listed.data as { endpoints: Array<{ uri: string; kind: string; manifest_action?: string }> };
+    assert.deepEqual(listedData.endpoints.map((endpoint) => endpoint.uri), [
+      "slock://registry",
+      "plugin://local/workspace",
+      "plugin://memory/reme",
+    ]);
+    assert.deepEqual(listedData.endpoints.map((endpoint) => endpoint.manifest_action), ["manifest", "manifest", "manifest"]);
+
+    const internal = await human.call("slock://registry", "list_endpoints", {
+      mime_type: "application/json",
+      data: { include_internal: true },
+    });
+    const internalData = internal.data as { endpoints: Array<{ uri: string }> };
+    assert.ok(internalData.endpoints.some((endpoint) => endpoint.uri === "agent://local/pi-assistant"));
+
+    const manifest = await human.call("slock://registry", "manifest", {
+      mime_type: "application/json",
+      data: {},
+    });
+    assert.match(String(manifest.data), /list_endpoints\(payload/);
+    assert.match(String(manifest.data), /manifest action before endpoint-specific actions/);
+  } finally {
+    await human.close();
+    await registry.node.close();
+  }
+});
 
 test("Slock basic mention flow stays on IPC endpoints", async () => {
   const context = createContext();
@@ -587,6 +634,124 @@ test("Shell plugin rejects non-allowlisted exec without capability grant", async
   await shell.node.close();
 });
 
+test("ReMe memory plugin maps stable actions to HTTP and gates writes", async () => {
+  const reme = mockFetch((path) => {
+    if (path === "/retrieve_personal_memory") {
+      return { memories: [{ text: "User prefers concise Chinese answers." }] };
+    }
+    return { ok: true };
+  });
+  const context = createContext();
+  const human = createNode("human://user/local");
+  const grantStore = createSlockGrantStore();
+  const memory = createReMeMemoryPlugin({
+    uri: "plugin://memory/reme",
+    base_url: "http://reme.test",
+    workspace_id: "kairos-ipc",
+    grant_store: grantStore,
+  });
+
+  try {
+    await human.connect(context.createTransport("human"));
+    await memory.node.connect(context.createTransport("memory"));
+
+    const manifest = await human.call("plugin://memory/reme", "manifest", {
+      mime_type: "application/json",
+      data: {},
+    });
+    assert.equal(manifest.mime_type, "text/typescript");
+    assert.match(String(manifest.data), /summarize\(payload: ReMeSummarizeRequest\): ReMeMemoryResponse/);
+    assert.match(String(manifest.data), /Do not send a summary field directly/);
+
+    const retrieved = await human.call("plugin://memory/reme", "retrieve", {
+      mime_type: "application/json",
+      data: { scope: "personal", query: "style" },
+    });
+    const retrieveData = retrieved.data as { endpoint: string; memories: string[] };
+    assert.equal(retrieveData.endpoint, "/retrieve_personal_memory");
+    assert.deepEqual(retrieveData.memories, ["User prefers concise Chinese answers."]);
+    assert.equal(reme.requests[0]?.path, "/retrieve_personal_memory");
+    assert.equal(reme.requests[0]?.body.workspace_id, "kairos-ipc");
+
+    await assert.rejects(
+      human.call("plugin://memory/reme", "summarize", {
+        mime_type: "application/json",
+        data: { scope: "task", trajectories: [] },
+      }),
+      (error) => {
+        assert.ok(error instanceof IpcCallError);
+        assert.equal(error.code, "PAYLOAD_INVALID");
+        assert.match(error.message, /trajectories/);
+        return true;
+      },
+    );
+
+    await assert.rejects(
+      human.call("plugin://memory/reme", "summarize", {
+        mime_type: "application/json",
+        data: { scope: "task", trajectories: [{ messages: [{ role: "user", content: "Remember this task decision." }] }] },
+      }),
+      (error) => {
+        assert.ok(error instanceof IpcCallError);
+        assert.equal(error.code, "ACTION_FAILED");
+        assert.match(error.message, /capability grant is required/);
+        return true;
+      },
+    );
+
+    const grant = grantStore.issue({
+      source: "human://user/local",
+      target: "plugin://memory/reme",
+      action: "summarize",
+      ttl_ms: 60000,
+      risk: "memory_write",
+    });
+    await assert.rejects(
+      human.call("plugin://memory/reme", "summarize", {
+        mime_type: "application/json",
+        data: { scope: "personal", summary: "User likes apples.", approval_grant: grant },
+      }),
+      (error) => {
+        assert.ok(error instanceof IpcCallError);
+        assert.equal(error.code, "PAYLOAD_INVALID");
+        assert.match(error.message, /trajectories/);
+        return true;
+      },
+    );
+    const summarized = await human.call("plugin://memory/reme", "summarize", {
+      mime_type: "application/json",
+      data: {
+        scope: "task",
+        trajectories: [{ messages: [{ role: "user", content: "Remember this task decision." }], score: 1.0 }],
+        approval_grant: grant,
+      },
+    });
+    const summarizeData = summarized.data as { endpoint: string };
+    assert.equal(summarizeData.endpoint, "/summary_task_memory");
+    assert.equal(reme.requests.at(-1)?.path, "/summary_task_memory");
+    assert.equal(Object.hasOwn(reme.requests.at(-1)?.body ?? {}, "approval_grant"), false);
+
+    const vectorGrant = grantStore.issue({
+      source: "human://user/local",
+      target: "plugin://memory/reme",
+      action: "vector_store",
+      ttl_ms: 60000,
+      risk: "memory_admin",
+    });
+    await human.call("plugin://memory/reme", "vector_store", {
+      mime_type: "application/json",
+      data: { operation: "list", approval_grant: vectorGrant },
+    });
+    assert.equal(reme.requests.at(-1)?.path, "/vector_store");
+    assert.equal(reme.requests.at(-1)?.body.action, "list");
+    assert.equal(Object.hasOwn(reme.requests.at(-1)?.body ?? {}, "operation"), false);
+  } finally {
+    await human.close();
+    await memory.node.close();
+    reme.restore();
+  }
+});
+
 function createContext() {
   const dir = mkdtempSync(join("/tmp", "kairos-ipc-slock-test-"));
   const registry = new EndpointRegistry();
@@ -657,6 +822,38 @@ class MemoryKernelTransport implements IpcTransport {
       listener(frame);
     }
   }
+}
+
+function mockFetch(handler: (path: string, body: Record<string, unknown>) => unknown): {
+  requests: Array<{ path: string; body: Record<string, unknown> }>;
+  restore(): void;
+} {
+  const requests: Array<{ path: string; body: Record<string, unknown> }> = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    const body = parseJsonBody(typeof init?.body === "string" ? init.body : "");
+    requests.push({ path: url.pathname, body });
+    return new Response(JSON.stringify(handler(url.pathname, body)), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  return {
+    requests,
+    restore() {
+      globalThis.fetch = previousFetch;
+    },
+  };
+}
+
+function parseJsonBody(value: string): Record<string, unknown> {
+  if (value.length === 0) {
+    return {};
+  }
+  const parsed = JSON.parse(value);
+  return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
 }
 
 async function waitFor(condition: () => boolean, timeoutMs = 1000): Promise<void> {

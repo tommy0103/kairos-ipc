@@ -9,6 +9,7 @@ import {
   type RejectData,
 } from "../../protocol/src/index.ts";
 import { connectTransport, type IpcTransport } from "./transport.ts";
+import { z, ZodError, type ZodType } from "zod";
 
 export interface ActionContext<TData = unknown> {
   envelope: Envelope<TData>;
@@ -16,23 +17,49 @@ export interface ActionContext<TData = unknown> {
 }
 
 export type ActionResult<TData = unknown> = EnvelopePayload<TData> | TData | Promise<EnvelopePayload<TData> | TData>;
+export type StreamActionResult<TData = unknown> = AsyncIterable<EnvelopePayload<TData> | TData>;
 export type ActionHandler<TData = unknown, TResult = unknown> = (
   payload: EnvelopePayload<TData>,
   context: ActionContext<TData>,
-) => ActionResult<TResult>;
+) => ActionResult<TResult> | StreamActionResult<TResult> | Promise<StreamActionResult<TResult>>;
 
 export type MimeSpec = string | string[];
 
-export interface ActionOptions {
+export interface SchemaActionArgs<TData = unknown> {
+  input: TData;
+  payload: EnvelopePayload<TData>;
+  context: ActionContext<TData>;
+}
+
+export type SchemaActionHandler<TData = unknown, TResult = unknown> = (
+  args: SchemaActionArgs<TData>,
+) => ActionResult<TResult> | StreamActionResult<TResult> | Promise<StreamActionResult<TResult>>;
+
+export interface ActionOptions<TData = unknown, TResult = unknown> {
   accepts?: MimeSpec;
   returns?: MimeSpec;
   description?: string;
+  doc?: string;
+  input?: ZodType<TData>;
+  output?: ZodType<TResult>;
+  input_name?: string;
+  output_name?: string;
+  examples?: unknown[];
 }
 
 interface ActionRegistration {
-  handler: ActionHandler;
+  handler: ActionHandler | SchemaActionHandler;
+  options: ActionOptions;
+  mode: "payload" | "schema";
+}
+
+interface DecoratedActionMetadata {
+  name?: string;
   options: ActionOptions;
 }
+
+const PLUGIN_URI_BY_CLASS = new WeakMap<Function, EndpointUri>();
+const ACTION_METADATA_BY_METHOD = new WeakMap<Function, DecoratedActionMetadata>();
 
 export interface DebugEvent {
   node: EndpointUri;
@@ -124,6 +151,39 @@ export function createNode(uri: EndpointUri, options: CreateNodeOptions = {}): I
   return new IpcNode(uri, options);
 }
 
+export { z };
+
+export function Plugin(uri: EndpointUri): ClassDecorator {
+  return (value: Function) => {
+    PLUGIN_URI_BY_CLASS.set(value, uri);
+  };
+}
+
+export function Action<TData = unknown, TResult = unknown>(
+  nameOrOptions?: string | ActionOptions<TData, TResult>,
+  maybeOptions: ActionOptions<TData, TResult> = {},
+): MethodDecorator {
+  const name = typeof nameOrOptions === "string" ? nameOrOptions : undefined;
+  const options = typeof nameOrOptions === "string" ? maybeOptions : nameOrOptions ?? {};
+  return actionMetadataDecorator({ name, options: options as ActionOptions });
+}
+
+export function Accepts(accepts: MimeSpec): MethodDecorator {
+  return actionMetadataDecorator({ options: { accepts } });
+}
+
+export function Returns(returns: MimeSpec): MethodDecorator {
+  return actionMetadataDecorator({ options: { returns } });
+}
+
+export function createPluginNode(instance: object, options: CreateNodeOptions = {}): IpcNode {
+  const uri = PLUGIN_URI_BY_CLASS.get(instance.constructor);
+  if (!uri) {
+    throw new Error(`plugin class is missing @Plugin metadata: ${instance.constructor.name}`);
+  }
+  return createNode(uri, options).plugin(instance);
+}
+
 export class IpcNode {
   readonly uri: EndpointUri;
   private readonly defaultTtlMs: number;
@@ -147,8 +207,8 @@ export class IpcNode {
 
   action<TData = unknown, TResult = unknown>(
     name: string,
-    optionsOrHandler: ActionOptions | ActionHandler<TData, TResult>,
-    maybeHandler?: ActionHandler<TData, TResult>,
+    optionsOrHandler: ActionOptions<TData, TResult> | ActionHandler<TData, TResult> | SchemaActionHandler<TData, TResult>,
+    maybeHandler?: ActionHandler<TData, TResult> | SchemaActionHandler<TData, TResult>,
   ): this {
     if (!name.trim()) {
       throw new Error("action name must be non-empty");
@@ -160,7 +220,16 @@ export class IpcNode {
       throw new Error(`action handler is required: ${name}`);
     }
 
-    this.actions.set(name, { handler: handler as ActionHandler, options });
+    this.actions.set(name, {
+      handler: handler as ActionHandler | SchemaActionHandler,
+      options: options as ActionOptions,
+      mode: options.input ? "schema" : "payload",
+    });
+    return this;
+  }
+
+  plugin(instance: object): this {
+    registerPluginActions(this, instance);
     return this;
   }
 
@@ -541,6 +610,9 @@ export class IpcNode {
 
   private async handleEnd(envelope: Envelope): Promise<void> {
     await this.dispatchEnd(envelope);
+    if (this.resolvePending(envelope)) {
+      return;
+    }
     if (envelope.header.reply_to) {
       this.forwardTerminalStreamEnvelope(envelope, "END");
     }
@@ -607,8 +679,25 @@ export class IpcNode {
         return;
       }
 
-      const result = await registration.handler(envelope.payload, { envelope, node: this });
-      const responsePayload = toPayload(result, envelope.payload.mime_type);
+      const context = { envelope, node: this };
+      let result;
+      if (registration.mode === "schema") {
+        const input = parseActionInput(registration.options, envelope.payload.data);
+        result = await (registration.handler as SchemaActionHandler)({
+          input,
+          payload: { ...envelope.payload, data: input },
+          context,
+        });
+      } else {
+        result = await (registration.handler as ActionHandler)(envelope.payload, context);
+      }
+
+      if (isAsyncIterable(result)) {
+        await this.sendStreamResult(envelope, registration, result, responseOpCode);
+        return;
+      }
+
+      const responsePayload = parseActionOutput(registration.options, toPayload(result, envelope.payload.mime_type));
       if (!mimeMatches(responsePayload.mime_type, registration.options.returns)) {
         this.sendReject(envelope, "MIME_RETURN_MISMATCH", `action returned ${responsePayload.mime_type}`, {
           returns: registration.options.returns ?? null,
@@ -624,7 +713,34 @@ export class IpcNode {
 
       this.sendEmitResult(envelope, responsePayload);
     } catch (error) {
+      if (error instanceof ZodError) {
+        this.sendReject(envelope, "PAYLOAD_INVALID", formatZodError(error), { issues: error.issues });
+        return;
+      }
       this.sendReject(envelope, "ACTION_FAILED", error instanceof Error ? error.message : "action failed");
+    }
+  }
+
+  private async sendStreamResult(
+    request: Envelope,
+    registration: ActionRegistration,
+    result: AsyncIterable<unknown>,
+    responseOpCode: "RESOLVE" | "EMIT",
+  ): Promise<void> {
+    for await (const item of result) {
+      const responsePayload = parseActionOutput(registration.options, toPayload(item, request.payload.mime_type));
+      if (!mimeMatches(responsePayload.mime_type, registration.options.returns)) {
+        this.sendReject(request, "MIME_RETURN_MISMATCH", `action returned ${responsePayload.mime_type}`, {
+          returns: registration.options.returns ?? null,
+          actual: responsePayload.mime_type,
+        });
+        return;
+      }
+      this.sendEmitResult(request, responsePayload);
+    }
+
+    if (responseOpCode === "RESOLVE") {
+      this.sendEndResult(request, { mime_type: request.payload.mime_type, data: null });
     }
   }
 
@@ -654,6 +770,26 @@ export class IpcNode {
           ttl_ms: this.defaultTtlMs,
         },
         spec: { op_code: "EMIT", action: request.spec.action },
+        payload,
+      },
+    });
+  }
+
+  private sendEndResult(request: Envelope, payload: EnvelopePayload): void {
+    const target = request.header.reply_to ?? request.header.source;
+    this.trySendFrame({
+      type: "envelope",
+      envelope: {
+        header: {
+          msg_id: createMsgId(),
+          correlation_id: request.header.correlation_id ?? request.header.msg_id,
+          source: this.uri,
+          target,
+          reply_to: null,
+          routing_slip: request.header.routing_slip,
+          ttl_ms: this.defaultTtlMs,
+        },
+        spec: { op_code: "END", action: request.spec.action },
         payload,
       },
     });
@@ -768,13 +904,14 @@ export class IpcNode {
   private createManifestPayload(): EnvelopePayload<string> {
     const interfaceName = manifestInterfaceName(this.uri);
     const actions = [...this.actions.entries()].sort(([left], [right]) => left.localeCompare(right));
+    const declarations = schemaTypeDeclarations(actions);
     const body = actions.length > 0
       ? actions.map(([action, registration]) => manifestActionLine(action, registration.options)).join("\n")
       : "  // no actions registered";
 
     return {
       mime_type: "text/typescript",
-      data: `interface ${interfaceName} {\n${body}\n}`,
+      data: `${declarations ? `${declarations}\n\n` : ""}interface ${interfaceName} {\n${body}\n}`,
     };
   }
 
@@ -833,6 +970,73 @@ function isPayload(value: unknown): value is EnvelopePayload {
   return isRecord(value) && typeof value.mime_type === "string" && Object.hasOwn(value, "data");
 }
 
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return isRecord(value) && typeof value[Symbol.asyncIterator] === "function";
+}
+
+function parseActionInput(options: ActionOptions, data: unknown): unknown {
+  return options.input ? options.input.parse(data) : data;
+}
+
+function parseActionOutput(options: ActionOptions, payload: EnvelopePayload): EnvelopePayload {
+  return options.output ? { ...payload, data: options.output.parse(payload.data) } : payload;
+}
+
+function actionMetadataDecorator(metadata: Partial<DecoratedActionMetadata>): MethodDecorator {
+  return ((...args: unknown[]) => {
+    const target = decoratedMethodTarget(args);
+    const current = ACTION_METADATA_BY_METHOD.get(target.method) ?? { name: target.name, options: {} };
+    ACTION_METADATA_BY_METHOD.set(target.method, {
+      name: metadata.name ?? current.name ?? target.name,
+      options: { ...current.options, ...(metadata.options ?? {}) },
+    });
+  }) as MethodDecorator;
+}
+
+function decoratedMethodTarget(args: unknown[]): { method: Function; name: string } {
+  if (typeof args[0] === "function" && isRecord(args[1]) && typeof args[1].name === "string") {
+    return { method: args[0], name: args[1].name };
+  }
+
+  const name = typeof args[1] === "string" || typeof args[1] === "symbol" ? String(args[1]) : "action";
+  const descriptor = args[2];
+  if (isRecord(descriptor) && typeof descriptor.value === "function") {
+    return { method: descriptor.value, name };
+  }
+
+  throw new Error("@Action can only decorate methods");
+}
+
+function registerPluginActions(node: IpcNode, instance: object): void {
+  const prototype = Object.getPrototypeOf(instance) as Record<string, unknown>;
+  for (const key of Object.getOwnPropertyNames(prototype)) {
+    if (key === "constructor") {
+      continue;
+    }
+
+    const method = prototype[key];
+    if (typeof method !== "function") {
+      continue;
+    }
+
+    const metadata = ACTION_METADATA_BY_METHOD.get(method);
+    if (!metadata) {
+      continue;
+    }
+
+    const options = metadata.options.input ? metadata.options : { ...metadata.options, input: z.unknown() };
+    node.action(metadata.name ?? key, options, async ({ input, context }) => {
+      return await method.call(instance, input, context);
+    });
+  }
+}
+
+function formatZodError(error: ZodError): string {
+  return error.issues
+    .map((issue) => `${issue.path.length > 0 ? issue.path.join(".") : "payload"}: ${issue.message}`)
+    .join("; ") || "payload failed schema validation";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -883,18 +1087,146 @@ function mimePatternMatches(actual: string, pattern: string): boolean {
 }
 
 function manifestActionLine(action: string, options: ActionOptions): string {
+  const inputType = options.input ? schemaTypeName(action, "input", options) : "unknown";
+  const outputType = options.output ? schemaTypeName(action, "output", options) : "unknown";
   const docs = [
-    options.description,
+    options.doc ?? options.description,
     options.accepts ? `@accepts ${formatMimeSpec(options.accepts)}` : undefined,
     options.returns ? `@returns ${formatMimeSpec(options.returns)}` : undefined,
+    ...(options.examples ?? []).map((example) => `@example ${stringifyCompact(example)}`),
   ].filter((line): line is string => Boolean(line));
 
   if (docs.length === 0) {
-    return `  ${action}(payload: unknown): unknown;`;
+    return `  ${action}(payload: ${inputType}): ${outputType};`;
   }
 
-  const comment = ["  /**", ...docs.map((line) => `   * ${line}`), "   */"].join("\n");
-  return `${comment}\n  ${action}(payload: unknown): unknown;`;
+  const comment = ["  /**", ...docs.flatMap((line) => line.split("\n")).map((line) => `   * ${line}`), "   */"].join("\n");
+  return `${comment}\n  ${action}(payload: ${inputType}): ${outputType};`;
+}
+
+function schemaTypeDeclarations(actions: Array<[string, ActionRegistration]>): string {
+  const declarations: string[] = [];
+  const seen = new Set<string>();
+  for (const [action, registration] of actions) {
+    if (registration.options.input) {
+      const name = schemaTypeName(action, "input", registration.options);
+      if (!seen.has(name)) {
+        seen.add(name);
+        declarations.push(schemaToTsDeclaration(name, registration.options.input));
+      }
+    }
+    if (registration.options.output) {
+      const name = schemaTypeName(action, "output", registration.options);
+      if (!seen.has(name)) {
+        seen.add(name);
+        declarations.push(schemaToTsDeclaration(name, registration.options.output));
+      }
+    }
+  }
+  return declarations.filter(Boolean).join("\n\n");
+}
+
+function schemaTypeName(action: string, kind: "input" | "output", options: ActionOptions): string {
+  if (kind === "input" && options.input_name) {
+    return options.input_name;
+  }
+  if (kind === "output" && options.output_name) {
+    return options.output_name;
+  }
+  return `${capitalizeIdentifier(action)}${kind === "input" ? "Input" : "Output"}`;
+}
+
+function schemaToTsDeclaration(name: string, schema: ZodType): string {
+  const jsonSchema = z.toJSONSchema(schema) as JsonSchema;
+  const description = typeof jsonSchema.description === "string" ? tsDoc([jsonSchema.description]) : "";
+  if (jsonSchema.type === "object" || isRecord(jsonSchema.properties)) {
+    return `${description}${description ? "\n" : ""}export interface ${name} ${renderObjectType(jsonSchema, 0)}`;
+  }
+  return `${description}${description ? "\n" : ""}export type ${name} = ${renderJsonSchemaType(jsonSchema, 0)};`;
+}
+
+type JsonSchema = Record<string, unknown>;
+
+function renderJsonSchemaType(schema: unknown, indent: number): string {
+  if (!isRecord(schema)) {
+    return "unknown";
+  }
+
+  if (Array.isArray(schema.enum)) {
+    return schema.enum.map((value) => JSON.stringify(value)).join(" | ") || "never";
+  }
+  if (Object.hasOwn(schema, "const")) {
+    return JSON.stringify(schema.const);
+  }
+  if (Array.isArray(schema.anyOf)) {
+    return schema.anyOf.map((entry) => renderJsonSchemaType(entry, indent)).join(" | ");
+  }
+  if (Array.isArray(schema.oneOf)) {
+    return schema.oneOf.map((entry) => renderJsonSchemaType(entry, indent)).join(" | ");
+  }
+
+  const type = Array.isArray(schema.type) ? schema.type.filter((item) => item !== "null")[0] : schema.type;
+  switch (type) {
+    case "string":
+      return "string";
+    case "number":
+    case "integer":
+      return "number";
+    case "boolean":
+      return "boolean";
+    case "null":
+      return "null";
+    case "array":
+      return `Array<${renderJsonSchemaType(schema.items, indent)}>`;
+    case "object":
+      if (!isRecord(schema.properties) && schema.additionalProperties === true) {
+        return "Record<string, unknown>";
+      }
+      return renderObjectType(schema, indent);
+    default:
+      return "unknown";
+  }
+}
+
+function renderObjectType(schema: JsonSchema, indent: number): string {
+  const properties = isRecord(schema.properties) ? schema.properties : {};
+  const required = new Set(Array.isArray(schema.required) ? schema.required.filter((item): item is string => typeof item === "string") : []);
+  const currentIndent = "  ".repeat(indent);
+  const childIndent = "  ".repeat(indent + 1);
+  const lines: string[] = ["{"];
+
+  for (const [key, value] of Object.entries(properties)) {
+    if (isRecord(value) && typeof value.description === "string") {
+      lines.push(tsDoc([value.description], childIndent));
+    }
+    const optional = required.has(key) ? "" : "?";
+    lines.push(`${childIndent}${propertyKey(key)}${optional}: ${renderJsonSchemaType(value, indent + 1)};`);
+  }
+
+  if (isRecord(schema.additionalProperties)) {
+    lines.push(`${childIndent}[key: string]: ${renderJsonSchemaType(schema.additionalProperties, indent + 1)};`);
+  } else if (schema.additionalProperties === true) {
+    lines.push(`${childIndent}[key: string]: unknown;`);
+  }
+
+  lines.push(`${currentIndent}}`);
+  return lines.join("\n");
+}
+
+function propertyKey(key: string): string {
+  return /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(key) ? key : JSON.stringify(key);
+}
+
+function tsDoc(lines: string[], indent = ""): string {
+  return [`${indent}/**`, ...lines.map((line) => `${indent} * ${line}`), `${indent} */`].join("\n");
+}
+
+function stringifyCompact(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "null";
+  } catch {
+    return String(value);
+  }
 }
 
 function formatMimeSpec(spec: MimeSpec): string {
@@ -906,6 +1238,13 @@ function manifestInterfaceName(uri: string): string {
   const safe = last.replace(/[^a-zA-Z0-9_$]/g, "_");
   const name = safe.length > 0 ? safe : "Node";
   return /^[a-zA-Z_$]/.test(name) ? capitalize(name) : `Node_${name}`;
+}
+
+function capitalizeIdentifier(value: string): string {
+  const parts = value.split(/[^a-zA-Z0-9_$]+/).filter(Boolean);
+  const joined = parts.length > 0 ? parts.map(capitalize).join("") : "Action";
+  const safe = joined.replace(/[^a-zA-Z0-9_$]/g, "_");
+  return /^[a-zA-Z_$]/.test(safe) ? safe : `Action_${safe}`;
 }
 
 function capitalize(value: string): string {
