@@ -1,4 +1,5 @@
 node_modules/
+packages/slock-ui-bridge/dist/
 traces/
 dev.docs/
 *.log

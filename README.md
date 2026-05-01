@@ -18,19 +18,21 @@ It is a message substrate for addressable actors.
 ## Commands
 
 ```bash
-npm test
-npm run kernel -- --socket /tmp/kairos-ipc.sock --trace traces/ipc-trace.jsonl
-npm run demo:echo
-npm run demo:pipeline
-npm run demo:slock-basic
-npm run demo:slock-agent-adapter
-npm run demo:slock-pi-faux
-npm run demo:slock-web -- --port 5173
+bun install
+bun run test
+bun run kernel -- --socket /tmp/kairos-ipc.sock --trace traces/ipc-trace.jsonl
+bun run demo:echo
+bun run demo:pipeline
+bun run demo:slock-basic
+bun run demo:slock-agent-adapter
+bun run demo:slock-pi-faux
+bun run build:slock-ui
+bun run demo:slock-web -- --port 5173
 ```
 
-The tests use in-memory connections because this Codex sandbox rejects local `net.Server.listen()` calls with `EPERM`. The Unix socket NDJSON transport is implemented and intended to run in a normal local environment.
+The tests use in-memory connections because this Codex sandbox can reject local listener calls with `EPERM`. The Unix socket NDJSON transport and Bun web bridge are implemented and intended to run in a normal local environment.
 
-`npm run demo:echo` starts a local Unix socket kernel, registers `agent://demo/simple` and `plugin://demo/echo`, then performs this SDK-level call:
+`bun run demo:echo` starts a local Unix socket kernel, registers `agent://demo/simple` and `plugin://demo/echo`, then performs this SDK-level call:
 
 ```ts
 const result = await agent.call("plugin://demo/echo", "echo", {
@@ -49,7 +51,7 @@ plugin.action(
 );
 ```
 
-`npm run demo:pipeline` starts the same local kernel and sends one payload through a linear SDK-managed route:
+`bun run demo:pipeline` starts the same local kernel and sends one payload through a linear SDK-managed route:
 
 ```text
 agent://demo/pipeline-agent
@@ -60,7 +62,7 @@ agent://demo/pipeline-agent
 
 The kernel only sees ordinary envelopes; the SDK handles `reply_to` and `routing_slip` advancement.
 
-`npm run demo:slock-basic` runs the first Slock-flavored vertical slice:
+`bun run demo:slock-basic` runs the first Slock-flavored vertical slice:
 
 ```text
 human://user/local
@@ -73,9 +75,9 @@ human://user/local
 
 This is still pure IPC: channel, human, agent, and calculator are all endpoints, and the kernel remains unaware of Slock concepts.
 
-`npm run demo:slock-web -- --port 5173` starts the browser UI bridge. The page uses local HTTP for user actions and SSE for channel events, while the bridge uses `human://user/local` over IPC to talk to the channel. The web demo defaults to `agent://local/pi-assistant`, backed by `@mariozechner/pi-ai`.
+`bun run demo:slock-web -- --port 5173` builds the Vue UI and starts the browser UI bridge. The page uses local HTTP for user actions and SSE for channel events, while the bridge uses `human://user/local` over IPC to talk to the channel. The web demo defaults to `agent://local/pi-assistant`, backed by `@mariozechner/pi-ai`.
 
-`npm run demo:slock-agent-adapter` runs a separate tool-agnostic adapter demo:
+`bun run demo:slock-agent-adapter` runs a separate tool-agnostic adapter demo:
 
 ```text
 IPC CALL action=run
@@ -105,8 +107,8 @@ Use `api_key` / `base_url` for direct values, or `api_key_env` / `base_url_env` 
 For `slock-web`, configure the default pi assistant with environment variables or CLI flags:
 
 ```bash
-OPENAI_API_KEY=... npm run demo:slock-web -- --port 5173
-npm run demo:slock-web -- --provider openai --model gpt-4o-mini --base-url http://localhost:4000/v1
+OPENAI_API_KEY=... bun run demo:slock-web -- --port 5173
+bun run demo:slock-web -- --provider openai --model gpt-4o-mini --base-url http://localhost:4000/v1
 ```
 
 The pi assistant is exposed through `@pi`, `@pi-assistant`, and `@agent`. Its Slock tools are `read`, `write`, `edit`, and `exec`: `read` calls the workspace plugin directly; `write`, `edit`, and `exec` first request human approval, then call the workspace or shell plugin through IPC.

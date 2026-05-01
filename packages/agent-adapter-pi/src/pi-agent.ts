@@ -70,10 +70,11 @@ export function createPiRuntime<TApi extends Api = Api>(options: PiRuntimeOption
   return {
     async *run(input: SlockAgentRun, context: AgentRuntimeContext): AsyncIterable<AgentRuntimeEvent> {
       const piContext = await buildContext(input, context, options);
-      const maxToolTurns = options.max_tool_turns ?? 8;
+      const maxToolTurns = options.max_tool_turns;
+      let toolTurns = 0;
       let lastStreamedText = "";
 
-      for (let turn = 0; turn <= maxToolTurns; turn++) {
+      while (true) {
         if (context.signal?.aborted) {
           yield cancelledFinalEvent(context.signal);
           return;
@@ -124,6 +125,10 @@ export function createPiRuntime<TApi extends Api = Api>(options: PiRuntimeOption
           return;
         }
 
+        if (maxToolTurns !== undefined && toolTurns >= maxToolTurns) {
+          throw new Error(`pi-ai exceeded max tool turns: ${maxToolTurns}`);
+        }
+
         for (const toolCall of toolCalls) {
           if (context.signal?.aborted) {
             yield cancelledFinalEvent(context.signal);
@@ -147,9 +152,8 @@ export function createPiRuntime<TApi extends Api = Api>(options: PiRuntimeOption
           yield toolStatusEvent(input.message_id, toolCall, result.isError ? "errored" : "completed", toolResultText(result), result.isError);
           piContext.messages.push(result);
         }
+        toolTurns++;
       }
-
-      throw new Error(`pi-ai exceeded max tool turns: ${maxToolTurns}`);
     },
   };
 }

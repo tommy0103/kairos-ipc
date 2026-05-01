@@ -1,6 +1,6 @@
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { createNode, type IpcNode } from "../../sdk/src/index.ts";
+import { createNode, z, type IpcNode } from "../../sdk/src/index.ts";
 import type { SlockCapabilityGrant, SlockGrantStore } from "../../slock-channel/src/index.ts";
 
 export interface WorkspaceListRequest {
@@ -103,6 +103,92 @@ export interface WorkspacePlugin {
   root: string;
 }
 
+const workspacePathSchema = z.string().min(1).describe("Path relative to the configured workspace root. Absolute paths and parent-directory escapes are rejected.");
+const capabilityGrantSchema = z.object({
+  id: z.string().describe("Grant id."),
+  token: z.string().describe("Opaque grant token."),
+  source: z.string().describe("Endpoint URI that requested the grant."),
+  target: z.string().describe("Endpoint URI the grant applies to."),
+  actions: z.array(z.string()).describe("Allowed action names."),
+  issued_at: z.string().describe("Grant issue timestamp."),
+  expires_at: z.string().describe("Grant expiration timestamp."),
+  approval_id: z.string().optional().describe("Human approval id that produced this grant."),
+  risk: z.string().optional().describe("Approval risk label, when available."),
+}).describe("Temporary Slock capability grant attached by ipc_call after human approval. Do not invent manually.");
+const approvalGrantSchema = capabilityGrantSchema.optional();
+const listRequestSchema = z.object({
+  path: workspacePathSchema.optional().describe("Directory or file path to list. Defaults to the workspace root."),
+  recursive: z.boolean().optional().describe("When true, recursively include nested entries."),
+  max_entries: z.number().int().positive().optional().describe("Maximum number of entries to return. The plugin clamps this to its configured limit."),
+  include_hidden: z.boolean().optional().describe("Include dotfiles and dot-directories when true."),
+  include_ignored: z.boolean().optional().describe("Include default ignored names such as .git, node_modules, dist, build, and coverage when true."),
+}).describe("List files and directories under the configured workspace root.");
+const listEntrySchema = z.object({
+  path: z.string().describe("Entry path relative to the workspace root."),
+  name: z.string().describe("Base name of the entry."),
+  type: z.enum(["file", "directory", "symlink", "other"]).describe("Filesystem entry type."),
+  bytes: z.number().describe("Entry size in bytes."),
+  mtime_ms: z.number().describe("Entry modification time as Unix epoch milliseconds."),
+}).describe("One workspace listing entry.");
+const listResultSchema = z.object({
+  path: z.string().describe("Listed path relative to the workspace root."),
+  entries: z.array(listEntrySchema).describe("Listed entries."),
+  truncated: z.boolean().describe("True when results were cut off by max_entries or the configured limit."),
+}).describe("Workspace list response.");
+const readRequestSchema = z.object({
+  path: workspacePathSchema.describe("UTF-8 file path to read, relative to the workspace root."),
+  max_bytes: z.number().int().positive().optional().describe("Maximum UTF-8 bytes to return. The plugin clamps this to its configured limit."),
+}).describe("Read a UTF-8 file under the configured workspace root.");
+const readResultSchema = z.object({
+  path: z.string().describe("Read path relative to the workspace root."),
+  content: z.string().describe("UTF-8 file content, possibly truncated."),
+  bytes: z.number().describe("Returned byte count."),
+  truncated: z.boolean().describe("True when content was clipped by max_bytes or the configured limit."),
+}).describe("Workspace read response.");
+const writeRequestSchema = z.object({
+  path: workspacePathSchema.describe("UTF-8 file path to write, relative to the workspace root."),
+  content: z.string().describe("Complete UTF-8 file content to write."),
+  approval_grant: approvalGrantSchema,
+}).describe("Write a UTF-8 file under the configured workspace root.");
+const writeResultSchema = z.object({
+  path: z.string().describe("Written path relative to the workspace root."),
+  bytes: z.number().describe("Written byte count."),
+}).describe("Workspace write response.");
+const editRequestSchema = z.object({
+  path: workspacePathSchema.describe("UTF-8 file path to edit, relative to the workspace root."),
+  old_text: z.string().min(1).describe("Exact UTF-8 text to replace. Must be non-empty and must appear in the file."),
+  new_text: z.string().describe("Replacement UTF-8 text."),
+  approval_grant: approvalGrantSchema,
+}).describe("Replace exact UTF-8 text in a file under the configured workspace root.");
+const editResultSchema = z.object({
+  path: z.string().describe("Edited path relative to the workspace root."),
+  replacements: z.number().int().describe("Number of replacements made."),
+  bytes: z.number().describe("Final file size in bytes."),
+}).describe("Workspace edit response.");
+const searchRequestSchema = z.object({
+  query: z.string().min(1).describe("Literal UTF-8 search string. This is not a regular expression."),
+  path: workspacePathSchema.optional().describe("Directory or file path to search. Defaults to the workspace root."),
+  case_sensitive: z.boolean().optional().describe("When true, search with case-sensitive matching."),
+  max_matches: z.number().int().positive().optional().describe("Maximum number of matches to return. The plugin clamps this to its configured limit."),
+  max_files: z.number().int().positive().optional().describe("Maximum number of files to scan. The plugin clamps this to its configured limit."),
+  max_file_bytes: z.number().int().positive().optional().describe("Skip files larger than this byte count. The plugin clamps this to its configured limit."),
+  include_hidden: z.boolean().optional().describe("Search dotfiles and dot-directories when true."),
+  include_ignored: z.boolean().optional().describe("Search default ignored names such as .git, node_modules, dist, build, and coverage when true."),
+}).describe("Search UTF-8 files under the configured workspace root for a literal string.");
+const searchMatchSchema = z.object({
+  path: z.string().describe("Matched file path relative to the workspace root."),
+  line_number: z.number().int().positive().describe("1-based line number."),
+  column: z.number().int().positive().describe("1-based column number."),
+  line: z.string().describe("Matched line, clipped for display if very long."),
+}).describe("One workspace search match.");
+const searchResultSchema = z.object({
+  query: z.string().describe("Search query."),
+  path: z.string().describe("Searched path relative to the workspace root."),
+  matches: z.array(searchMatchSchema).describe("Search matches."),
+  searched_files: z.number().int().describe("Number of files scanned."),
+  truncated: z.boolean().describe("True when results were cut off by match, file, or configured limits."),
+}).describe("Workspace search response.");
+
 export function createWorkspacePlugin(options: WorkspacePluginOptions = {}): WorkspacePlugin {
   const uri = options.uri ?? "plugin://local/workspace";
   const node = createNode(uri);
@@ -119,9 +205,13 @@ export function createWorkspacePlugin(options: WorkspacePluginOptions = {}): Wor
       description: "List files and directories under the configured workspace root. Payload: { path?, recursive?, max_entries?, include_hidden?, include_ignored? }.",
       accepts: "application/json",
       returns: "application/json",
+      input: listRequestSchema,
+      output: listResultSchema,
+      input_name: "WorkspaceListRequest",
+      output_name: "WorkspaceListResult",
     },
-    async (payload) => {
-      const request = normalizeListRequest(payload.data);
+    async ({ input }) => {
+      const request = input;
       const startPath = resolveWorkspacePath(root, request.path ?? ".");
       const limit = clampLimit(request.max_entries, maxListEntries);
       const entries: WorkspaceListEntry[] = [];
@@ -144,9 +234,13 @@ export function createWorkspacePlugin(options: WorkspacePluginOptions = {}): Wor
       description: "Read a UTF-8 file under the configured workspace root.",
       accepts: "application/json",
       returns: "application/json",
+      input: readRequestSchema,
+      output: readResultSchema,
+      input_name: "WorkspaceReadRequest",
+      output_name: "WorkspaceReadResult",
     },
-    async (payload) => {
-      const request = payload.data;
+    async ({ input }) => {
+      const request = input;
       const filePath = resolveWorkspacePath(root, request.path);
       const content = await readFile(filePath, "utf8");
       const limit = clampLimit(request.max_bytes, maxReadBytes);
@@ -169,9 +263,13 @@ export function createWorkspacePlugin(options: WorkspacePluginOptions = {}): Wor
       description: "Search UTF-8 files under the configured workspace root for a literal string. Payload: { query, path?, case_sensitive?, max_matches?, max_files?, max_file_bytes?, include_hidden?, include_ignored? }.",
       accepts: "application/json",
       returns: "application/json",
+      input: searchRequestSchema,
+      output: searchResultSchema,
+      input_name: "WorkspaceSearchRequest",
+      output_name: "WorkspaceSearchResult",
     },
-    async (payload) => {
-      const request = normalizeSearchRequest(payload.data);
+    async ({ input }) => {
+      const request = input;
       const startPath = resolveWorkspacePath(root, request.path ?? ".");
       const result = await searchWorkspace(root, startPath, request, {
         max_matches: clampLimit(request.max_matches, maxSearchMatches),
@@ -196,9 +294,13 @@ export function createWorkspacePlugin(options: WorkspacePluginOptions = {}): Wor
       description: "Write a UTF-8 file under the configured workspace root.",
       accepts: "application/json",
       returns: "application/json",
+      input: writeRequestSchema,
+      output: writeResultSchema,
+      input_name: "WorkspaceWriteRequest",
+      output_name: "WorkspaceWriteResult",
     },
-    async (payload, context) => {
-      const request = normalizeWriteRequest(payload.data);
+    async ({ input, context }) => {
+      const request = input;
       assertGrant(options.grant_store, request.approval_grant, context.envelope.header.source, uri, "write");
       const filePath = resolveWorkspacePath(root, request.path);
       await mkdir(dirname(filePath), { recursive: true });
@@ -219,9 +321,13 @@ export function createWorkspacePlugin(options: WorkspacePluginOptions = {}): Wor
       description: "Replace exact UTF-8 text in a file under the configured workspace root.",
       accepts: "application/json",
       returns: "application/json",
+      input: editRequestSchema,
+      output: editResultSchema,
+      input_name: "WorkspaceEditRequest",
+      output_name: "WorkspaceEditResult",
     },
-    async (payload, context) => {
-      const request = normalizeEditRequest(payload.data);
+    async ({ input, context }) => {
+      const request = input;
       assertGrant(options.grant_store, request.approval_grant, context.envelope.header.source, uri, "edit");
       const filePath = resolveWorkspacePath(root, request.path);
       const content = await readFile(filePath, "utf8");
@@ -274,40 +380,6 @@ function resolveWorkspacePath(root: string, requestedPath: string): string {
     throw new Error(`workspace path escapes root: ${requestedPath}`);
   }
   return filePath;
-}
-
-function normalizeListRequest(value: WorkspaceListRequest | undefined): WorkspaceListRequest {
-  if (value === undefined || value === null) {
-    return {};
-  }
-  if (typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("workspace.list requires an object payload");
-  }
-  return value;
-}
-
-function normalizeWriteRequest(value: WorkspaceWriteRequest): WorkspaceWriteRequest {
-  if (!value || typeof value.path !== "string" || typeof value.content !== "string") {
-    throw new Error("workspace.write requires path and content");
-  }
-  return value;
-}
-
-function normalizeEditRequest(value: WorkspaceEditRequest): WorkspaceEditRequest {
-  if (!value || typeof value.path !== "string" || typeof value.old_text !== "string" || typeof value.new_text !== "string") {
-    throw new Error("workspace.edit requires path, old_text, and new_text");
-  }
-  if (value.old_text.length === 0) {
-    throw new Error("workspace.edit old_text must be non-empty");
-  }
-  return value;
-}
-
-function normalizeSearchRequest(value: WorkspaceSearchRequest): WorkspaceSearchRequest {
-  if (!value || typeof value.query !== "string" || value.query.length === 0) {
-    throw new Error("workspace.search requires a non-empty query");
-  }
-  return value;
 }
 
 function clampLimit(value: number | undefined, fallback: number): number {

@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
-import vm from "node:vm";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { inferMentions } from "../packages/slock-channel/src/index.ts";
-import { renderJs } from "../packages/slock-ui-bridge/src/assets.ts";
 
 test("Slock channel infers mentions from configured aliases", () => {
   assert.deepEqual(
@@ -29,6 +28,10 @@ test("Slock channel mention aliases can target multiple agents", () => {
   );
 });
 
-test("UI bridge renders syntactically valid browser JavaScript", () => {
-  assert.doesNotThrow(() => new vm.Script(renderJs(), { filename: "app.js" }));
+test("UI bridge frontend is implemented as a Vue app", () => {
+  const main = readFileSync(new URL("../packages/slock-ui-bridge/web/src/main.ts", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../packages/slock-ui-bridge/web/src/App.vue", import.meta.url), "utf8");
+
+  assert.match(main, /createApp\(App\)\.mount\("#app"\)/);
+  assert.match(app, /<script setup lang="ts">/);
 });

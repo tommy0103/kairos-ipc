@@ -308,6 +308,14 @@ test("Workspace plugin exposes bounded list and search without approval", async 
   await human.connect(context.createTransport("human"));
   await workspace.node.connect(context.createTransport("workspace"));
 
+  const manifest = await human.call("plugin://local/workspace", "manifest", {
+    mime_type: "application/json",
+    data: {},
+  });
+  assert.match(String(manifest.data), /edit\(payload: WorkspaceEditRequest\): WorkspaceEditResult/);
+  assert.match(String(manifest.data), /old_text: string/);
+  assert.doesNotMatch(String(manifest.data), /edit\(payload: unknown\): unknown/);
+
   const listed = await human.call("plugin://local/workspace", "list", {
     mime_type: "application/json",
     data: { recursive: true, max_entries: 10 },

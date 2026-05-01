@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { fauxAssistantMessage, fauxText, fauxToolCall, registerFauxProvider } from "@mariozechner/pi-ai";
-import { createPiAgent, createPiSlockTools } from "../packages/agent-adapter-pi/src/index.ts";
+import { createPiAgent, createPiRuntime, createPiSlockTools } from "../packages/agent-adapter-pi/src/index.ts";
 import { AllowAllCapabilityGate } from "../packages/kernel/src/capability.ts";
 import type { Connection } from "../packages/kernel/src/registry.ts";
 import { EndpointRegistry } from "../packages/kernel/src/registry.ts";
@@ -74,6 +74,62 @@ test("pi-ai agent adapter projects streamed text onto Slock", async () => {
     await human.close();
     await channel.node.close();
     await agent.node.close();
+    pi.unregister();
+  }
+});
+
+test("pi-ai runtime does not cap tool turns by default", async () => {
+  const pi = registerFauxProvider({ tokensPerSecond: 1000 });
+  const toolTurnCount = 10;
+  pi.setResponses([
+    ...Array.from({ length: toolTurnCount }, (_, index) => (context) => {
+      const priorResults = context.messages.filter((message) => message.role === "toolResult");
+      assert.equal(priorResults.length, index);
+      return fauxAssistantMessage(fauxToolCall("loop_tool", { index }, { id: `tool-${index}` }), { stopReason: "toolUse" });
+    }),
+    (context) => {
+      const results = context.messages.filter((message) => message.role === "toolResult");
+      assert.equal(results.length, toolTurnCount);
+      return fauxAssistantMessage(fauxText("Finished after ten tool turns."));
+    },
+  ]);
+
+  const runtime = createPiRuntime({
+    model: pi.getModel(),
+    execute_tool: (toolCall) => ({
+      role: "toolResult",
+      toolCallId: toolCall.id,
+      toolName: toolCall.name,
+      content: [fauxText(`ok ${toolCall.arguments.index}`)],
+      isError: false,
+      timestamp: Date.now(),
+    }),
+  });
+
+  try {
+    const events = [];
+    for await (const event of runtime.run({
+      channel: "app://slock/channel/general",
+      message_id: "message-1",
+      text: "@pi keep going",
+      sender: "human://user/local",
+    }, {
+      agent_uri: "agent://local/pi-assistant",
+      node: {
+        uri: "agent://local/pi-assistant",
+        call: async () => {
+          throw new Error("history unavailable");
+        },
+      },
+    })) {
+      events.push(event);
+    }
+
+    assert.equal(pi.state.callCount, toolTurnCount + 1);
+    assert.equal(events.filter((event) => event.type === "status" && event.metadata?.state === "completed").length, toolTurnCount);
+    const finalEvent = events.find((event) => event.type === "final");
+    assert.equal(finalEvent?.result.final_text, "Finished after ten tool turns.");
+  } finally {
     pi.unregister();
   }
 });

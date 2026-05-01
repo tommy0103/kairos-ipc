@@ -4,20 +4,31 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "kernel": "node packages/kernel/src/main.ts",
-    "demo:echo": "node examples/echo-demo.ts",
-    "demo:pipeline": "node examples/pipeline-demo.ts",
-    "demo:slock-basic": "node examples/slock-basic-demo.ts",
-    "demo:slock-agent-adapter": "node examples/slock-agent-adapter-demo.ts",
-    "demo:slock-pi-faux": "node examples/slock-pi-faux-demo.ts",
-    "demo:slock-web": "node examples/slock-web-demo.ts",
-    "test": "node --test tests/*.test.ts"
+    "kernel": "$BUN_INSTALL/bin/bun packages/kernel/src/main.ts",
+    "demo:echo": "$BUN_INSTALL/bin/bun examples/echo-demo.ts",
+    "demo:pipeline": "$BUN_INSTALL/bin/bun examples/pipeline-demo.ts",
+    "demo:slock-basic": "$BUN_INSTALL/bin/bun examples/slock-basic-demo.ts",
+    "demo:slock-agent-adapter": "$BUN_INSTALL/bin/bun examples/slock-agent-adapter-demo.ts",
+    "demo:slock-pi-faux": "$BUN_INSTALL/bin/bun examples/slock-pi-faux-demo.ts",
+    "demo:slock-web": "$BUN_INSTALL/bin/bun run build:slock-ui && $BUN_INSTALL/bin/bun examples/slock-web-demo.ts",
+    "dev:slock-ui": "vite --config packages/slock-ui-bridge/vite.config.ts",
+    "typecheck:slock-ui": "vue-tsc -p packages/slock-ui-bridge/tsconfig.web.json --noEmit",
+    "build:slock-ui": "vue-tsc -p packages/slock-ui-bridge/tsconfig.web.json --noEmit && vite build --config packages/slock-ui-bridge/vite.config.ts",
+    "test": "$BUN_INSTALL/bin/bun test tests/*.test.ts"
   },
   "engines": {
-    "node": ">=25.0.0"
+    "bun": ">=1.3.13"
   },
   "dependencies": {
     "@mariozechner/pi-ai": "^0.70.6",
+    "vue": "^3.5.33",
     "zod": "^4.4.1"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.13",
+    "@vitejs/plugin-vue": "^6.0.6",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.10",
+    "vue-tsc": "^3.2.7"
   }
 }
