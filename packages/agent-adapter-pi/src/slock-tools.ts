@@ -1,6 +1,12 @@
 import { Type, type Tool, type ToolCall, type ToolResultMessage } from "@mariozechner/pi-ai";
 import type { EndpointUri } from "../../protocol/src/index.ts";
-import { IpcCallError } from "../../sdk/src/index.ts";
+import {
+  executeIpcToolCall,
+  IpcCallError,
+  normalizeIpcToolCallArgs,
+  type IpcToolCallArgs,
+  type IpcToolCallPreparation,
+} from "../../sdk/src/index.ts";
 import {
   SLOCK_APPROVAL_REQUEST_MIME,
   SLOCK_SHELL_EXEC_MIME,
@@ -30,7 +36,7 @@ export interface PiSlockTools {
 
 const IPC_CALL_TOOL = "ipc_call";
 
-type ApprovalOutcome = { grant: SlockCapabilityGrant } | { error: ToolResultMessage };
+type ApprovalOutcome = { grant: SlockCapabilityGrant } | { denied: string };
 
 export function createPiSlockTools(options: PiSlockToolsOptions = {}): PiSlockTools {
   const registryUri = options.registry_uri ?? "slock://registry";
@@ -55,7 +61,9 @@ export function createPiSlockTools(options: PiSlockToolsOptions = {}): PiSlockTo
   async function executeTool(toolCall: ToolCall, context: PiToolExecutionContext): Promise<ToolResultMessage> {
     switch (toolCall.name) {
       case IPC_CALL_TOOL:
-        return await callIpcTool(toolCall, context, normalizeIpcCallArgs(toolCall.arguments, shellUri));
+        return await callIpcTool(toolCall, context, normalizeIpcToolCallArgs(toolCall.arguments, {
+          default_mime_type: ({ target, action }) => defaultMimeType(target, action, shellUri),
+        }));
       default:
         return toolResult(toolCall, `Unknown tool: ${toolCall.name}`, true);
     }
@@ -66,42 +74,35 @@ export function createPiSlockTools(options: PiSlockToolsOptions = {}): PiSlockTo
     context: PiToolExecutionContext,
     args: IpcCallArgs,
   ): Promise<ToolResultMessage> {
-    const approval = await maybeRequestIpcApproval(toolCall, context, args);
-    if ("error" in approval) {
-      return approval.error;
-    }
-
-    const defaultTtlMs = defaultToolTtlMs(args, memoryUri, toolTtlMs, memoryToolTtlMs);
-    const result = await context.runtime.node.call(args.target, args.action, {
-      mime_type: args.mime_type,
-      data: approval.payload,
-    }, {
-      ttl_ms: args.ttl_ms ?? defaultTtlMs,
-      timeout_ms: args.timeout_ms ?? args.ttl_ms ?? defaultTtlMs,
+    const execution = await executeIpcToolCall(context.runtime.node, args, {
       signal: context.runtime.signal,
+      default_ttl_ms: (call) => defaultToolTtlMs(call, memoryUri, toolTtlMs, memoryToolTtlMs),
+      prepare_call: (call) => prepareApprovedIpcCall(toolCall, context, call),
     });
 
     return toolResult(
       toolCall,
-      stringifyJson({ mime_type: result.mime_type, data: result.data }),
-      isNonZeroShellResult(args, result.data),
+      stringifyJson({ mime_type: execution.result.mime_type, data: execution.result.data }),
+      isNonZeroShellResult(execution.call, execution.result.data),
     );
   }
 
-  async function maybeRequestIpcApproval(
+  async function prepareApprovedIpcCall(
     toolCall: ToolCall,
     context: PiToolExecutionContext,
     args: IpcCallArgs,
-  ): Promise<{ payload: unknown } | { error: ToolResultMessage }> {
+  ): Promise<IpcToolCallPreparation> {
     const request = createApprovalRequestForIpcCall(args, workspaceUri, shellUri, memoryUri);
     if (!request) {
       return { payload: args.payload };
     }
 
     const approval = await requestApproval(toolCall, context, request);
-    return "error" in approval
-      ? approval
-      : { payload: attachApprovalGrant(args.payload, approval.grant, args) };
+    if ("denied" in approval) {
+      throw new Error(approval.denied);
+    }
+
+    return { payload: attachApprovalGrant(args.payload, approval.grant, args) };
   }
 
   async function requestApproval(
@@ -138,15 +139,11 @@ export function createPiSlockTools(options: PiSlockToolsOptions = {}): PiSlockTo
     if (result.data.approved) {
       return result.data.grant
         ? { grant: result.data.grant }
-        : { error: toolResult(toolCall, "Approval did not include a capability grant.", true) };
+        : { denied: "Approval did not include a capability grant." };
     }
 
     return {
-      error: toolResult(
-        toolCall,
-        `Approval denied${result.data.reason ? `: ${result.data.reason}` : "."}`,
-        true,
-      ),
+      denied: `Approval denied${result.data.reason ? `: ${result.data.reason}` : "."}`,
     };
   }
 
@@ -165,15 +162,6 @@ export function createPiSlockTools(options: PiSlockToolsOptions = {}): PiSlockTo
       // Best effort: local abort must not hang while cleaning up remote approval UI.
     }
   }
-}
-
-interface IpcCallArgs {
-  target: EndpointUri;
-  action: string;
-  mime_type: string;
-  payload: unknown;
-  ttl_ms?: number;
-  timeout_ms?: number;
 }
 
 function createTools(
@@ -210,34 +198,6 @@ function toolResult(toolCall: ToolCall, text: string, isError = false): ToolResu
     isError,
     timestamp: Date.now(),
   };
-}
-
-function normalizeIpcCallArgs(value: Record<string, unknown>, shellUri: EndpointUri): IpcCallArgs {
-  const rawPayload = Object.hasOwn(value, "payload")
-    ? value.payload
-    : Object.hasOwn(value, "data")
-      ? value.data
-      : {};
-  const nestedPayload = readEnvelopePayload(rawPayload);
-
-  return {
-    target: readString(value, "target") as EndpointUri,
-    action: readString(value, "action"),
-    mime_type: readOptionalString(value, "mime_type")
-      ?? nestedPayload?.mime_type
-      ?? defaultMimeType(readString(value, "target") as EndpointUri, readString(value, "action"), shellUri),
-    payload: nestedPayload ? nestedPayload.data : rawPayload,
-    ttl_ms: readOptionalPositiveNumber(value, "ttl_ms"),
-    timeout_ms: readOptionalPositiveNumber(value, "timeout_ms"),
-  };
-}
-
-function readEnvelopePayload(value: unknown): { mime_type: string; data: unknown } | undefined {
-  if (!isRecord(value) || typeof value.mime_type !== "string" || !Object.hasOwn(value, "data")) {
-    return undefined;
-  }
-
-  return { mime_type: value.mime_type, data: value.data };
 }
 
 function createApprovalRequestForIpcCall(
@@ -363,29 +323,6 @@ function isAbortError(error: unknown): boolean {
   return error instanceof IpcCallError && (error.code === "CALL_ABORTED" || error.code === "PIPELINE_ABORTED");
 }
 
-function readString(value: Record<string, unknown>, key: string): string {
-  const next = value[key];
-  if (typeof next !== "string" || next.trim().length === 0) {
-    throw new Error(`${key} must be a non-empty string`);
-  }
-  return next;
-}
-
-function readOptionalNumber(value: Record<string, unknown>, key: string): number | undefined {
-  const next = value[key];
-  return typeof next === "number" && Number.isFinite(next) ? next : undefined;
-}
-
-function readOptionalPositiveNumber(value: Record<string, unknown>, key: string): number | undefined {
-  const next = readOptionalNumber(value, key);
-  return next !== undefined && next > 0 ? next : undefined;
-}
-
-function readOptionalString(value: Record<string, unknown>, key: string): string | undefined {
-  const next = value[key];
-  return typeof next === "string" && next.trim().length > 0 ? next : undefined;
-}
-
 function ipcCallDescription(
   options: PiSlockToolsOptions,
   registryUri: EndpointUri,
@@ -397,8 +334,9 @@ function ipcCallDescription(
   const targetHint = targets.length > 0 ? ` Known useful target URIs: ${targets.join(", ")}.` : "";
   return [
     "Call IPC endpoint actions through a single CALL/RESOLVE request; all plugin work should go through this tool.",
-    `Use ${registryUri} list_endpoints to discover mounted endpoints before choosing a plugin URI.`,
+    `Use ${registryUri} list_endpoints to discover mounted root endpoints before choosing a plugin URI.`,
     "For an endpoint you have not inspected in this run, call its manifest action before endpoint-specific actions and follow the manifest payload notes.",
+    "If a manifest exposes list_children, call it to discover deeper endpoint children or namespaces; for children with manifest_action, call the child manifest before child-specific actions.",
     "Leave timeout_ms and ttl_ms unset by default; only set them when the user asks for a specific limit, the manifest requires it, or a previous default wait timed out. Memory writes have a longer internal default wait.",
     `Use ${workspaceUri} manifest/list/search/read for workspace discovery and file reads.`,
     `Use ${memoryUri} retrieve for long-term memory when user preferences, project history, or prior decisions matter.`,

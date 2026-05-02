@@ -13,10 +13,13 @@ import {
   Action,
   createNode,
   createPluginNode,
+  executeIpcToolCall,
   IpcCallError,
+  normalizeIpcToolCallArgs,
   Plugin,
   Returns,
   z,
+  type CallOptions,
   type IpcTransport,
 } from "../packages/sdk/src/index.ts";
 
@@ -42,6 +45,100 @@ test("SDK wraps echo action CALL and RESOLVE", async () => {
 
   await agent.close();
   await echo.close();
+});
+
+test("SDK ipc tool bridge normalizes tool call payloads", () => {
+  const envelopePayload = normalizeIpcToolCallArgs({
+    target: "plugin://sdk/tool",
+    action: "echo",
+    payload: { mime_type: "text/plain", data: "hello" },
+  });
+  assert.deepEqual(envelopePayload, {
+    target: "plugin://sdk/tool",
+    action: "echo",
+    mime_type: "text/plain",
+    payload: "hello",
+    ttl_ms: undefined,
+    timeout_ms: undefined,
+  });
+
+  const defaultedPayload = normalizeIpcToolCallArgs({
+    target: "plugin://sdk/shell",
+    action: "exec",
+    data: { command: "node", args: ["--version"] },
+  }, {
+    default_mime_type: ({ target, action }) => target === "plugin://sdk/shell" && action === "exec"
+      ? "application/vnd.slock.shell.exec+json"
+      : "application/json",
+  });
+  assert.equal(defaultedPayload.mime_type, "application/vnd.slock.shell.exec+json");
+  assert.deepEqual(defaultedPayload.payload, { command: "node", args: ["--version"] });
+});
+
+test("SDK ipc tool bridge executes prepared calls with resolved defaults", async () => {
+  const calls: Array<{
+    target: string;
+    action: string;
+    payload: unknown;
+    options?: CallOptions;
+  }> = [];
+  const caller = {
+    async call(target: string, action: string, payload: unknown, options?: CallOptions) {
+      calls.push({ target, action, payload, options });
+      return { mime_type: "application/json", data: { ok: true } };
+    },
+  };
+
+  const execution = await executeIpcToolCall(caller, {
+    target: "plugin://sdk/memory",
+    action: "summarize",
+    payload: { scope: "personal", summary: "User likes apples." },
+  }, {
+    context: { grant: "grant-1" },
+    default_ttl_ms: (call) => call.target === "plugin://sdk/memory" ? 123000 : 1000,
+    prepare_call: (call, context) => ({
+      payload: {
+        ...(call.payload as Record<string, unknown>),
+        approval_grant: context.context.grant,
+      },
+    }),
+  });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0], {
+    target: "plugin://sdk/memory",
+    action: "summarize",
+    payload: {
+      mime_type: "application/json",
+      data: {
+        scope: "personal",
+        summary: "User likes apples.",
+        approval_grant: "grant-1",
+      },
+    },
+    options: { ttl_ms: 123000, timeout_ms: 123000 },
+  });
+  assert.deepEqual(execution.result, { mime_type: "application/json", data: { ok: true } });
+});
+
+test("SDK ipc tool bridge respects explicit ttl and timeout", async () => {
+  const calls: Array<{ options?: CallOptions }> = [];
+  const caller = {
+    async call(_target: string, _action: string, _payload: unknown, options?: CallOptions) {
+      calls.push({ options });
+      return { mime_type: "application/json", data: { ok: true } };
+    },
+  };
+
+  await executeIpcToolCall(caller, {
+    target: "plugin://sdk/tool",
+    action: "run",
+    payload: {},
+    ttl_ms: 2000,
+    timeout_ms: 3000,
+  }, { default_ttl_ms: 1000 });
+
+  assert.deepEqual(calls[0]?.options, { ttl_ms: 2000, timeout_ms: 3000 });
 });
 
 test("SDK returns default manifest payload", async () => {
@@ -96,6 +193,72 @@ test("SDK manifest includes action MIME metadata", async () => {
 
   await agent.close();
   await echo.close();
+});
+
+test("SDK manifest exposes endpoint child discovery", async () => {
+  const context = createContext();
+  const agent = createNode("agent://sdk/agent");
+  const root = createNode("plugin://sdk/root")
+    .child({
+      uri: "plugin://sdk/root/child",
+      kind: "endpoint",
+      label: "child",
+      description: "Nested callable child endpoint.",
+    })
+    .child({
+      uri: "plugin://sdk/root/cache",
+      kind: "resource",
+      label: "cache",
+      description: "Data-like child resource.",
+      dynamic: true,
+    });
+
+  await agent.connect(context.createTransport("agent"));
+  await root.connect(context.createTransport("root"));
+
+  const manifest = await agent.call("plugin://sdk/root", "manifest", {
+    mime_type: "application/json",
+    data: {},
+  });
+  assert.equal(manifest.mime_type, "text/typescript");
+  assert.match(String(manifest.data), /export interface EndpointChild/);
+  assert.match(String(manifest.data), /list_children\(payload: ListChildrenRequest\): ListChildrenResponse/);
+  assert.match(String(manifest.data), /call each endpoint child's manifest_action before child-specific actions/);
+
+  const listed = await agent.call("plugin://sdk/root", "list_children", {
+    mime_type: "application/json",
+    data: {},
+  });
+  assert.equal(listed.mime_type, "application/json");
+  assert.deepEqual(listed.data, {
+    endpoint: "plugin://sdk/root",
+    recursive: false,
+    children: [
+      {
+        uri: "plugin://sdk/root/cache",
+        kind: "resource",
+        label: "cache",
+        description: "Data-like child resource.",
+        dynamic: true,
+      },
+      {
+        uri: "plugin://sdk/root/child",
+        kind: "endpoint",
+        label: "child",
+        description: "Nested callable child endpoint.",
+        manifest_action: "manifest",
+      },
+    ],
+  });
+
+  const endpointOnly = await agent.call("plugin://sdk/root", "list_children", {
+    mime_type: "application/json",
+    data: { kind: "endpoint", recursive: true },
+  });
+  assert.deepEqual((endpointOnly.data as { children: Array<{ uri: string }> }).children.map((child) => child.uri), ["plugin://sdk/root/child"]);
+
+  await agent.close();
+  await root.close();
 });
 
 test("SDK validates Zod action schemas and generates typed manifests", async () => {

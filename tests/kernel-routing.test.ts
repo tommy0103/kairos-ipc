@@ -8,6 +8,7 @@ import type { Connection } from "../packages/kernel/src/registry.ts";
 import { EndpointRegistry } from "../packages/kernel/src/registry.ts";
 import { Router } from "../packages/kernel/src/router.ts";
 import { TraceWriter } from "../packages/kernel/src/trace.ts";
+import { SLOCK_APPROVAL_REQUEST_MIME, SLOCK_MESSAGE_MIME } from "../packages/slock-channel/src/index.ts";
 
 test("routes CALL and RESOLVE between registered endpoints", () => {
   const context = createContext();
@@ -107,6 +108,113 @@ test("rejects envelopes whose source is not owned by the sending connection", ()
   assert.equal(plugin.frames.length, 0);
 });
 
+test("trace records content-safe Slock metadata without payload contents", () => {
+  const context = createContext();
+  const human = new MemoryConnection("human");
+  const channel = new MemoryConnection("channel");
+
+  context.registry.register("human://user/local", human);
+  context.registry.register("app://slock/channel/general", channel);
+
+  context.router.route({
+    header: {
+      msg_id: createMsgId(),
+      source: "human://user/local",
+      target: "app://slock/channel/general",
+      reply_to: "human://user/local",
+      ttl_ms: 30000,
+    },
+    spec: { op_code: "CALL", action: "post_message" },
+    payload: {
+      mime_type: SLOCK_MESSAGE_MIME,
+      data: {
+        text: "secret project detail",
+        mentions: ["agent://local/pi-assistant"],
+        thread_id: null,
+      },
+    },
+  }, human);
+
+  const traces = readTrace(context.tracePath);
+  assert.equal(traces[0]?.event, "envelope");
+  assert.equal(traces[0]?.payload_kind, "slock_message_input");
+  assert.equal(traces[0]?.channel, "app://slock/channel/general");
+  assert.equal(traces[0]?.mention_count, 1);
+  assert.equal(typeof traces[0]?.payload_hash, "string");
+  assert.equal(typeof traces[0]?.payload_size, "number");
+  assert.doesNotMatch(readFileSync(context.tracePath, "utf8"), /secret project detail/);
+});
+
+test("trace can capture full payloads when explicitly enabled", () => {
+  const dir = mkdtempSync(join("/tmp", "kairos-ipc-router-test-"));
+  const tracePath = join(dir, "trace.jsonl");
+  const registry = new EndpointRegistry();
+  const trace = new TraceWriter(tracePath, { capture_payload: true });
+  const router = new Router({ registry, capabilityGate: new AllowAllCapabilityGate(), trace });
+  const human = new MemoryConnection("human");
+  const channel = new MemoryConnection("channel");
+
+  registry.register("human://user/local", human);
+  registry.register("app://slock/channel/general", channel);
+
+  router.route({
+    header: {
+      msg_id: createMsgId(),
+      source: "human://user/local",
+      target: "app://slock/channel/general",
+      reply_to: "human://user/local",
+      ttl_ms: 30000,
+    },
+    spec: { op_code: "CALL", action: "post_message" },
+    payload: {
+      mime_type: SLOCK_MESSAGE_MIME,
+      data: { text: "debug payload text", thread_id: null },
+    },
+  }, human);
+
+  const traces = readTrace(tracePath);
+  assert.deepEqual((traces[0]?.payload as any).text, "debug payload text");
+});
+
+test("trace extracts approval risk and proposed call metadata", () => {
+  const context = createContext();
+  const agent = new MemoryConnection("agent");
+  const human = new MemoryConnection("human");
+
+  context.registry.register("agent://local/pi-assistant", agent);
+  context.registry.register("human://user/local", human);
+
+  context.router.route({
+    header: {
+      msg_id: createMsgId(),
+      source: "agent://local/pi-assistant",
+      target: "human://user/local",
+      reply_to: "agent://local/pi-assistant",
+      ttl_ms: 30000,
+    },
+    spec: { op_code: "CALL", action: "request_approval" },
+    payload: {
+      mime_type: SLOCK_APPROVAL_REQUEST_MIME,
+      data: {
+        id: "approval_1",
+        risk: "shell_exec",
+        summary: "Run pwd",
+        metadata: { channel: "app://slock/channel/general", thread_id: "channel_msg_1" },
+        proposed_call: { target: "plugin://local/shell", action: "exec", payload: { command: "pwd", args: [] } },
+      },
+    },
+  }, agent);
+
+  const traces = readTrace(context.tracePath);
+  assert.equal(traces[0]?.payload_kind, "slock_approval_request");
+  assert.equal(traces[0]?.approval_id, "approval_1");
+  assert.equal(traces[0]?.approval_risk, "shell_exec");
+  assert.equal(traces[0]?.approval_target, "plugin://local/shell");
+  assert.equal(traces[0]?.approval_action, "exec");
+  assert.equal(traces[0]?.channel, "app://slock/channel/general");
+  assert.equal(traces[0]?.thread_id, "channel_msg_1");
+});
+
 function createContext() {
   const dir = mkdtempSync(join("/tmp", "kairos-ipc-router-test-"));
   const tracePath = join(dir, "trace.jsonl");
@@ -114,6 +222,14 @@ function createContext() {
   const trace = new TraceWriter(tracePath);
   const router = new Router({ registry, capabilityGate: new AllowAllCapabilityGate(), trace });
   return { dir, tracePath, registry, router };
+}
+
+function readTrace(path: string): Array<Record<string, unknown>> {
+  return readFileSync(path, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
 function createCallEnvelope(): Envelope {

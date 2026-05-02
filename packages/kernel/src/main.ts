@@ -2,8 +2,9 @@ import { createUnixNdjsonKernel } from "./transport/unix-ndjson.ts";
 
 const socketPath = readOption("--socket") ?? process.env.KAIROS_IPC_SOCKET ?? "/tmp/kairos-ipc.sock";
 const tracePath = readOption("--trace") ?? process.env.KAIROS_IPC_TRACE ?? "traces/ipc-trace.jsonl";
+const captureTracePayload = readFlag("--trace-payload") || process.env.KAIROS_IPC_TRACE_PAYLOAD === "1";
 
-const kernel = await createUnixNdjsonKernel({ socketPath, tracePath });
+const kernel = await createUnixNdjsonKernel({ socketPath, tracePath, trace: { capture_payload: captureTracePayload } });
 
 console.log(`kairos-ipc kernel listening on ${kernel.socketPath}`);
 console.log(`trace writing to ${tracePath}`);
@@ -24,4 +25,8 @@ function readOption(name: string): string | undefined {
   }
   const value = process.argv[index + 1];
   return value && !value.startsWith("--") ? value : undefined;
+}
+
+function readFlag(name: string): boolean {
+  return process.argv.includes(name);
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { createMockAgent } from "../packages/agent-adapter-mock/src/index.ts";
@@ -8,7 +8,7 @@ import type { Connection } from "../packages/kernel/src/registry.ts";
 import { EndpointRegistry } from "../packages/kernel/src/registry.ts";
 import { Router } from "../packages/kernel/src/router.ts";
 import { TraceWriter } from "../packages/kernel/src/trace.ts";
-import { createCalculatorPlugin, createReMeMemoryPlugin, createShellPlugin, createWorkspacePlugin } from "../packages/plugins-demo/src/index.ts";
+import { createBrowserPlugin, createCalculatorPlugin, createReMeMemoryPlugin, createShellPlugin, createWorkspacePlugin } from "../packages/plugins-demo/src/index.ts";
 import type { ClientFrame, KernelFrame } from "../packages/protocol/src/index.ts";
 import { createNode, IpcCallError, type IpcTransport } from "../packages/sdk/src/index.ts";
 import { createSlockRegistry } from "../packages/slock-daemon/src/index.ts";
@@ -63,7 +63,8 @@ test("Slock registry lists mounted endpoints and guides manifest inspection", as
       data: {},
     });
     assert.match(String(manifest.data), /list_endpoints\(payload/);
-    assert.match(String(manifest.data), /manifest action before endpoint-specific actions/);
+    assert.match(String(manifest.data), /root endpoint's manifest before endpoint-specific actions/);
+    assert.match(String(manifest.data), /list_children/);
   } finally {
     await human.close();
     await registry.node.close();
@@ -283,6 +284,15 @@ test("Slock approval flow gates shell execution through human endpoint", async (
   const finalEvent = events.find((event) => event.type === "message_created" && event.message?.kind === "agent");
   assert.ok(finalEvent?.message?.text.includes("Approved shell exec: pwd"));
 
+  const traceText = readFileSync(context.tracePath, "utf8");
+  const traces = readTrace(context.tracePath);
+  assert.ok(traces.some((event) => event.payload_kind === "slock_message" && event.message_kind === "human" && event.message_id === "channel_msg_1"));
+  assert.ok(traces.some((event) => event.payload_kind === "slock_agent_run" && event.message_id === "channel_msg_1" && event.channel === "app://slock/channel/general"));
+  assert.ok(traces.some((event) => event.payload_kind === "slock_approval_request" && event.approval_risk === "shell_exec" && event.approval_target === "plugin://local/shell"));
+  assert.ok(traces.some((event) => event.payload_kind === "slock_shell_exec" && event.shell_command === "pwd"));
+  assert.ok(traces.some((event) => event.payload_kind === "slock_channel_event" && event.channel_event_type === "message_created" && event.message_kind === "agent"));
+  assert.doesNotMatch(traceText, /please run pwd/);
+
   await human.node.close();
   await channel.node.close();
   await agent.node.close();
@@ -349,6 +359,98 @@ test("Workspace plugin exposes bounded list and search without approval", async 
 
   await human.close();
   await workspace.node.close();
+});
+
+test("Browser plugin reads HTTP pages without approval", async () => {
+  const previousFetch = globalThis.fetch;
+  const requests: string[] = [];
+  globalThis.fetch = (async (input) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    requests.push(url.href);
+    return new Response("<!doctype html><title>Kairos Test Page</title><main><h1>Browser plugin says hi</h1><script>secret()</script></main>", {
+      status: 200,
+      headers: { "content-type": "text/html; charset=utf-8" },
+    });
+  }) as typeof fetch;
+
+  const context = createContext();
+  const human = createNode("human://user/local");
+  const browser = createBrowserPlugin({ uri: "plugin://local/browser" });
+
+  try {
+    await human.connect(context.createTransport("human"));
+    await browser.node.connect(context.createTransport("browser"));
+
+    const manifest = await human.call("plugin://local/browser", "manifest", {
+      mime_type: "application/json",
+      data: {},
+    });
+    assert.match(String(manifest.data), /read_page\(payload: BrowserReadPageRequest\): BrowserReadPageResult/);
+    assert.match(String(manifest.data), /max_redirects/);
+
+    const page = await human.call("plugin://local/browser", "read_page", {
+      mime_type: "application/json",
+      data: { url: "https://example.com/test", include_headers: true },
+    });
+    const data = page.data as {
+      status: number;
+      ok: boolean;
+      title?: string;
+      text: string;
+      content_type?: string;
+      headers?: Record<string, string>;
+    };
+    assert.equal(data.status, 200);
+    assert.equal(data.ok, true);
+    assert.equal(data.title, "Kairos Test Page");
+    assert.match(data.text, /Browser plugin says hi/);
+    assert.doesNotMatch(data.text, /secret/);
+    assert.equal(data.content_type, "text/html; charset=utf-8");
+    assert.equal(data.headers?.["content-type"], "text/html; charset=utf-8");
+    assert.deepEqual(requests, ["https://example.com/test"]);
+  } finally {
+    await human.close();
+    await browser.node.close();
+    globalThis.fetch = previousFetch;
+  }
+});
+
+test("Browser plugin can restrict origins when configured", async () => {
+  const previousFetch = globalThis.fetch;
+  const requests: string[] = [];
+  globalThis.fetch = (async (input) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    requests.push(url.href);
+    return new Response("ok", { status: 200, headers: { "content-type": "text/plain" } });
+  }) as typeof fetch;
+
+  const context = createContext();
+  const human = createNode("human://user/local");
+  const browser = createBrowserPlugin({ uri: "plugin://local/browser", allowed_origins: ["https://allowed.example"] });
+
+  try {
+    await human.connect(context.createTransport("human"));
+    await browser.node.connect(context.createTransport("browser"));
+
+    const page = await human.call("plugin://local/browser", "read_page", {
+      mime_type: "application/json",
+      data: { url: "https://allowed.example/page" },
+    });
+    assert.equal((page.data as { text: string }).text, "ok");
+
+    await assert.rejects(
+      human.call("plugin://local/browser", "read_page", {
+        mime_type: "application/json",
+        data: { url: "https://example.com/" },
+      }),
+      (error) => error instanceof IpcCallError && error.code === "ACTION_FAILED",
+    );
+    assert.deepEqual(requests, ["https://allowed.example/page"]);
+  } finally {
+    await human.close();
+    await browser.node.close();
+    globalThis.fetch = previousFetch;
+  }
 });
 
 test("Slock channel publishes product events on the subscription stream", async () => {
@@ -670,6 +772,21 @@ test("ReMe memory plugin maps stable actions to HTTP and gates writes", async ()
     assert.equal(manifest.mime_type, "text/typescript");
     assert.match(String(manifest.data), /summarize\(payload: ReMeSummarizeRequest\): ReMeMemoryResponse/);
     assert.match(String(manifest.data), /Do not send a summary field directly/);
+    assert.match(String(manifest.data), /list_children\(payload: ListChildrenRequest\): ListChildrenResponse/);
+
+    const children = await human.call("plugin://memory/reme", "list_children", {
+      mime_type: "application/json",
+      data: {},
+    });
+    const childrenData = children.data as { endpoint: string; children: Array<{ uri: string; kind: string; manifest_action?: string }> };
+    assert.equal(childrenData.endpoint, "plugin://memory/reme");
+    assert.deepEqual(childrenData.children.map((child) => child.uri), [
+      "plugin://memory/reme/personal",
+      "plugin://memory/reme/task",
+      "plugin://memory/reme/tool",
+    ]);
+    assert.deepEqual([...new Set(childrenData.children.map((child) => child.kind))], ["namespace"]);
+    assert.ok(childrenData.children.every((child) => child.manifest_action === undefined));
 
     const retrieved = await human.call("plugin://memory/reme", "retrieve", {
       mime_type: "application/json",
@@ -762,17 +879,27 @@ test("ReMe memory plugin maps stable actions to HTTP and gates writes", async ()
 
 function createContext() {
   const dir = mkdtempSync(join("/tmp", "kairos-ipc-slock-test-"));
+  const tracePath = join(dir, "trace.jsonl");
   const registry = new EndpointRegistry();
-  const trace = new TraceWriter(join(dir, "trace.jsonl"));
+  const trace = new TraceWriter(tracePath);
   const router = new Router({ registry, capabilityGate: new AllowAllCapabilityGate(), trace });
 
   return {
+    tracePath,
     registry,
     router,
     createTransport(id: string): IpcTransport {
       return new MemoryKernelTransport(id, registry, router, trace);
     },
   };
+}
+
+function readTrace(path: string): Array<Record<string, unknown>> {
+  return readFileSync(path, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
 }
 
 class MemoryKernelTransport implements IpcTransport {

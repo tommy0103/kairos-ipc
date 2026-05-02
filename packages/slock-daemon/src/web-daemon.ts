@@ -9,7 +9,7 @@ import { EndpointRegistry } from "../../kernel/src/registry.ts";
 import { Router } from "../../kernel/src/router.ts";
 import { TraceWriter } from "../../kernel/src/trace.ts";
 import { createUnixNdjsonKernel } from "../../kernel/src/transport/unix-ndjson.ts";
-import { createCalculatorPlugin, createReMeMemoryPlugin, createShellPlugin, createWorkspacePlugin } from "../../plugins-demo/src/index.ts";
+import { createBrowserPlugin, createCalculatorPlugin, createReMeMemoryPlugin, createShellPlugin, createWorkspacePlugin } from "../../plugins-demo/src/index.ts";
 import type { ClientFrame, KernelFrame } from "../../protocol/src/index.ts";
 import type { IpcNode } from "../../sdk/src/index.ts";
 import type { IpcTransport } from "../../sdk/src/transport.ts";
@@ -54,6 +54,7 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
   const workspaceUri = required(resolved.plugins?.workspace?.uri, "plugins.workspace.uri");
   const shellUri = required(resolved.plugins?.shell?.uri, "plugins.shell.uri");
   const calculatorUri = required(resolved.plugins?.calculator?.uri, "plugins.calculator.uri");
+  const browserUri = required(resolved.plugins?.browser?.uri, "plugins.browser.uri");
   const memoryUri = required(resolved.plugins?.memory?.uri, "plugins.memory.uri");
   const workspaceRoot = required(resolved.workspace_root, "workspace_root");
   const grantStore = createSlockGrantStore();
@@ -74,10 +75,10 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
       mention_aliases: channel.mention_aliases,
       history_limit: channel.history_limit,
     }));
-    const agents = agentConfigs.map((agent) => createDaemonAgent(agent, resolved, registryUri, workspaceUri, shellUri, calculatorUri, memoryUri));
+    const agents = agentConfigs.map((agent) => createDaemonAgent(agent, resolved, registryUri, workspaceUri, shellUri, calculatorUri, browserUri, memoryUri));
     const registry = createSlockRegistry({
       uri: registryUri,
-      endpoints: registryEndpoints(resolved, humanUri, resolved.ui_uri, channelConfigs, agentConfigs, workspaceUri, shellUri, calculatorUri, memoryUri),
+      endpoints: registryEndpoints(resolved, humanUri, resolved.ui_uri, channelConfigs, agentConfigs, workspaceUri, shellUri, calculatorUri, browserUri, memoryUri),
     });
 
     bridge = createSlockUiBridge({
@@ -90,6 +91,7 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
       })),
       human_node: human.node,
       human_endpoint: human,
+      trace_path: tracePath,
     });
 
     const nodes: IpcNode[] = [registry.node, human.node, bridge.node, ...channels.map((channel) => channel.node), ...agents.map((agent) => agent.node)];
@@ -113,6 +115,15 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
     }
     if (resolved.plugins?.calculator?.enabled) {
       nodes.push(createCalculatorPlugin({ uri: calculatorUri }).node);
+    }
+    if (resolved.plugins?.browser?.enabled) {
+      nodes.push(createBrowserPlugin({
+        uri: browserUri,
+        allowed_origins: resolved.plugins.browser.allowed_origins,
+        timeout_ms: resolved.plugins.browser.timeout_ms,
+        max_read_bytes: resolved.plugins.browser.max_read_bytes,
+        user_agent: resolved.plugins.browser.user_agent,
+      }).node);
     }
     if (resolved.plugins?.memory?.enabled) {
       nodes.push(createReMeMemoryPlugin({
@@ -199,6 +210,7 @@ function createDaemonAgent(
   workspaceUri: string,
   shellUri: string,
   calculatorUri: string,
+  browserUri: string,
   memoryUri: string,
 ): { node: IpcNode } {
   const uri = required(agent.uri, "agents[].uri");
@@ -223,7 +235,7 @@ function createDaemonAgent(
       workspace_uri: workspaceUri,
       shell_uri: shellUri,
       memory_uri: memoryUri,
-      ipc_call_targets: [registryUri, ...enabledPluginUris(config, workspaceUri, shellUri, calculatorUri, memoryUri)],
+      ipc_call_targets: [registryUri, ...enabledPluginUris(config, workspaceUri, shellUri, calculatorUri, browserUri, memoryUri)],
     }),
   });
 }
@@ -239,12 +251,14 @@ function enabledPluginUris(
   workspaceUri: string,
   shellUri: string,
   calculatorUri: string,
+  browserUri: string,
   memoryUri: string,
 ): string[] {
   return [
     config.plugins?.workspace?.enabled ? workspaceUri : undefined,
     config.plugins?.shell?.enabled ? shellUri : undefined,
     config.plugins?.calculator?.enabled ? calculatorUri : undefined,
+    config.plugins?.browser?.enabled ? browserUri : undefined,
     config.plugins?.memory?.enabled ? memoryUri : undefined,
   ].filter((uri): uri is string => Boolean(uri));
 }
@@ -258,6 +272,7 @@ function registryEndpoints(
   workspaceUri: string,
   shellUri: string,
   calculatorUri: string,
+  browserUri: string,
   memoryUri: string,
 ): SlockRegistryEndpoint[] {
   return [
@@ -283,6 +298,14 @@ function registryEndpoints(
         kind: "plugin",
         label: "calculator",
         description: "Demo calculator plugin.",
+      }
+      : undefined,
+    config.plugins?.browser?.enabled
+      ? {
+        uri: browserUri,
+        kind: "plugin",
+        label: "browser",
+        description: "Read-only browser/page inspection for allowlisted HTTP(S) origins.",
       }
       : undefined,
     config.plugins?.memory?.enabled

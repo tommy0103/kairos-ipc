@@ -50,7 +50,7 @@ export function createSlockRegistry(options: SlockRegistryOptions): SlockRegistr
   node.action<ListEndpointsRequest, ListEndpointsResponse>(
     "list_endpoints",
     {
-      description: "List daemon-mounted IPC endpoints. Call an endpoint's manifest action before endpoint-specific actions.",
+      description: "List daemon-mounted root IPC endpoints only. Call a root endpoint's manifest before endpoint-specific actions; if that manifest exposes list_children, use it for deeper endpoint/namespace discovery and read child manifests before child endpoint actions.",
       accepts: "application/json",
       returns: "application/json",
     },

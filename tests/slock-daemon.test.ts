@@ -26,6 +26,10 @@ test("Slock web daemon loads JSON config and starts mock agent mode", async () =
         base_url: "http://127.0.0.1:8002",
         workspace_id: "kairos-ipc-test",
       },
+      browser: {
+        enabled: true,
+        uri: "plugin://local/browser",
+      },
     },
     approval: { auto_approve: true },
   }), "utf8");
@@ -42,6 +46,9 @@ test("Slock web daemon loads JSON config and starts mock agent mode", async () =
   assert.equal(config.plugins?.memory?.uri, "plugin://memory/reme");
   assert.equal(config.plugins?.memory?.workspace_id, "kairos-ipc-test");
   assert.equal(config.plugins?.memory?.timeout_ms, 120000);
+  assert.equal(config.plugins?.browser?.enabled, true);
+  assert.equal(config.plugins?.browser?.uri, "plugin://local/browser");
+  assert.equal(config.plugins?.browser?.allowed_origins, undefined);
   assert.deepEqual(config.channel?.mention_aliases, {
     mock: "agent://local/mock",
     agent: "agent://local/mock",
@@ -55,6 +62,7 @@ test("Slock web daemon loads JSON config and starts mock agent mode", async () =
     assert.deepEqual(daemon.channel_uris, ["app://slock/channel/general", "app://slock/dm/local-mock"]);
     assert.equal(daemon.config.plugins?.calculator?.enabled, true);
     assert.equal(daemon.config.plugins?.memory?.enabled, true);
+    assert.equal(daemon.config.plugins?.browser?.enabled, true);
   } finally {
     await daemon.close();
   }

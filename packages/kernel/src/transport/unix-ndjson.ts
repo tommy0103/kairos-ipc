@@ -7,11 +7,12 @@ import { AllowAllCapabilityGate } from "../capability.ts";
 import type { Connection } from "../registry.ts";
 import { EndpointRegistry } from "../registry.ts";
 import { Router } from "../router.ts";
-import { TraceWriter } from "../trace.ts";
+import { TraceWriter, type TraceWriterOptions } from "../trace.ts";
 
 export interface UnixNdjsonKernelOptions {
   socketPath: string;
   tracePath: string;
+  trace?: TraceWriterOptions;
   kernelUri?: string;
 }
 
@@ -28,7 +29,7 @@ export async function createUnixNdjsonKernel(options: UnixNdjsonKernelOptions): 
   prepareSocketPath(options.socketPath);
 
   const registry = new EndpointRegistry();
-  const trace = new TraceWriter(options.tracePath);
+  const trace = new TraceWriter(options.tracePath, options.trace);
   const router = new Router({
     registry,
     capabilityGate: new AllowAllCapabilityGate(),

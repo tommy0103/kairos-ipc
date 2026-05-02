@@ -47,6 +47,29 @@ export interface ActionOptions<TData = unknown, TResult = unknown> {
   examples?: unknown[];
 }
 
+export type EndpointChildKind = "endpoint" | "namespace" | "resource";
+
+export interface EndpointChild {
+  uri: EndpointUri;
+  label?: string;
+  kind?: EndpointChildKind;
+  description?: string;
+  manifest_action?: "manifest" | string;
+  children_action?: "list_children" | string;
+  dynamic?: boolean;
+}
+
+export interface ListChildrenRequest {
+  recursive?: boolean;
+  kind?: EndpointChildKind;
+}
+
+export interface ListChildrenResponse {
+  endpoint: EndpointUri;
+  recursive: boolean;
+  children: EndpointChild[];
+}
+
 interface ActionRegistration {
   handler: ActionHandler | SchemaActionHandler;
   options: ActionOptions;
@@ -190,6 +213,7 @@ export class IpcNode {
   private readonly registerTimeoutMs: number;
   private readonly debug?: DebugSink;
   private readonly actions = new Map<string, ActionRegistration>();
+  private readonly childEndpoints = new Map<EndpointUri, EndpointChild>();
   private readonly emitHandlers = new Map<string, Set<EmitHandler>>();
   private readonly endHandlers = new Map<string, Set<EndHandler>>();
   private readonly cancelHandlers = new Map<string, Set<CancelHandler>>();
@@ -225,6 +249,22 @@ export class IpcNode {
       options: options as ActionOptions,
       mode: options.input ? "schema" : "payload",
     });
+    return this;
+  }
+
+  child(endpoint: EndpointChild): this {
+    if (!endpoint.uri.trim()) {
+      throw new Error("child endpoint uri must be non-empty");
+    }
+
+    this.childEndpoints.set(endpoint.uri, normalizeEndpointChild(endpoint));
+    return this;
+  }
+
+  children(endpoints: EndpointChild[]): this {
+    for (const endpoint of endpoints) {
+      this.child(endpoint);
+    }
     return this;
   }
 
@@ -665,6 +705,11 @@ export class IpcNode {
         return;
       }
 
+      if (envelope.spec.op_code === "CALL" && action === "list_children" && !this.actions.has("list_children")) {
+        this.sendResolve(envelope, this.createListChildrenPayload(envelope));
+        return;
+      }
+
       const registration = this.actions.get(action);
       if (!registration) {
         this.sendReject(envelope, "ACTION_NOT_FOUND", `action is not registered: ${action}`);
@@ -904,14 +949,42 @@ export class IpcNode {
   private createManifestPayload(): EnvelopePayload<string> {
     const interfaceName = manifestInterfaceName(this.uri);
     const actions = [...this.actions.entries()].sort(([left], [right]) => left.localeCompare(right));
-    const declarations = schemaTypeDeclarations(actions);
-    const body = actions.length > 0
-      ? actions.map(([action, registration]) => manifestActionLine(action, registration.options)).join("\n")
+    const includesVirtualListChildren = this.childEndpoints.size > 0 && !this.actions.has("list_children");
+    const declarations = [
+      includesVirtualListChildren ? listChildrenTypeDeclarations() : "",
+      schemaTypeDeclarations(actions),
+    ].filter(Boolean).join("\n\n");
+    const actionLines = [
+      includesVirtualListChildren ? listChildrenActionLine() : undefined,
+      ...actions.map(([action, registration]) => manifestActionLine(action, registration.options)),
+    ].filter((line): line is string => Boolean(line));
+    const body = actionLines.length > 0
+      ? actionLines.join("\n")
       : "  // no actions registered";
 
     return {
       mime_type: "text/typescript",
       data: `${declarations ? `${declarations}\n\n` : ""}interface ${interfaceName} {\n${body}\n}`,
+    };
+  }
+
+  private createListChildrenPayload(envelope: Envelope): EnvelopePayload<ListChildrenResponse> {
+    if (envelope.payload.mime_type !== "application/json") {
+      throw new Error("list_children requires application/json payload");
+    }
+
+    const request = readListChildrenRequest(envelope.payload.data);
+    const children = [...this.childEndpoints.values()]
+      .filter((child) => !request.kind || child.kind === request.kind)
+      .sort((left, right) => left.uri.localeCompare(right.uri));
+
+    return {
+      mime_type: "application/json",
+      data: {
+        endpoint: this.uri,
+        recursive: request.recursive === true,
+        children,
+      },
     };
   }
 
@@ -1084,6 +1157,82 @@ function mimePatternMatches(actual: string, pattern: string): boolean {
   }
 
   return actual === pattern;
+}
+
+function normalizeEndpointChild(child: EndpointChild): EndpointChild {
+  const kind = child.kind ?? "endpoint";
+  const manifestAction = child.manifest_action ?? (kind === "endpoint" ? "manifest" : undefined);
+  return {
+    ...child,
+    kind,
+    ...(manifestAction ? { manifest_action: manifestAction } : {}),
+  };
+}
+
+function readListChildrenRequest(value: unknown): ListChildrenRequest {
+  if (value === null || value === undefined) {
+    return {};
+  }
+  if (!isRecord(value)) {
+    throw new Error("list_children requires an object payload");
+  }
+
+  const kind = typeof value.kind === "string" && isEndpointChildKind(value.kind) ? value.kind : undefined;
+  return {
+    ...(value.recursive === true ? { recursive: true } : {}),
+    ...(kind ? { kind } : {}),
+  };
+}
+
+function isEndpointChildKind(value: string): value is EndpointChildKind {
+  return value === "endpoint" || value === "namespace" || value === "resource";
+}
+
+function listChildrenTypeDeclarations(): string {
+  return `export type EndpointChildKind = "endpoint" | "namespace" | "resource";
+
+export interface EndpointChild {
+  /** Child endpoint, namespace, or resource URI under this endpoint. */
+  uri: string;
+  /** Human-readable child label. */
+  label?: string;
+  /** Child type. Use endpoint for callable child endpoints, namespace for grouped capabilities, resource for data-like children. */
+  kind?: EndpointChildKind;
+  /** What this child represents and when to inspect it. */
+  description?: string;
+  /** Action to call on endpoint children before child-specific actions. */
+  manifest_action?: "manifest" | string;
+  /** Action to call when the child itself exposes deeper children. */
+  children_action?: "list_children" | string;
+  /** True when this child list may change at runtime. */
+  dynamic?: boolean;
+}
+
+export interface ListChildrenRequest {
+  /** When true, ask the endpoint to include nested children when it can do so cheaply. */
+  recursive?: boolean;
+  /** Optional child kind filter. */
+  kind?: EndpointChildKind;
+}
+
+export interface ListChildrenResponse {
+  /** Endpoint whose children were listed. */
+  endpoint: string;
+  /** Whether recursive discovery was requested. */
+  recursive: boolean;
+  /** Child endpoints, namespaces, or resources. For endpoint children, call manifest_action before child-specific actions. */
+  children: EndpointChild[];
+}`;
+}
+
+function listChildrenActionLine(): string {
+  return `  /**
+   * List child endpoints, namespaces, or resources below this endpoint.
+   * Discovery flow: read this root manifest, call list_children when children are needed, then call each endpoint child's manifest_action before child-specific actions.
+   * @accepts application/json
+   * @returns application/json
+   */
+  list_children(payload: ListChildrenRequest): ListChildrenResponse;`;
 }
 
 function manifestActionLine(action: string, options: ActionOptions): string {

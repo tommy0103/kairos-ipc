@@ -72,6 +72,14 @@ export interface SlockWebDaemonConfig {
       enabled?: boolean;
       uri?: EndpointUri;
     };
+    browser?: {
+      enabled?: boolean;
+      uri?: EndpointUri;
+      allowed_origins?: string[] | null;
+      timeout_ms?: number;
+      max_read_bytes?: number;
+      user_agent?: string;
+    };
     memory?: {
       enabled?: boolean;
       uri?: EndpointUri;
@@ -99,9 +107,10 @@ export interface LoadSlockWebDaemonConfigOptions {
 
 export const DEFAULT_PI_SYSTEM_PROMPT = [
   "You are pi-assistant running behind Slock IPC.",
-  "Use ipc_call for plugin actions: call slock://registry list_endpoints to discover mounted endpoints, then call an endpoint's manifest before endpoint-specific actions.",
+  "Use ipc_call for plugin actions: call slock://registry list_endpoints to discover mounted root endpoints, call the root manifest, call list_children when the manifest exposes deeper endpoints or namespaces, then call a child endpoint's manifest before child-specific actions.",
   "Do not set ipc_call timeout_ms or ttl_ms casually; leave them unset unless the user asks for a limit, the manifest requires it, or a previous default wait timed out.",
   "For repo/workspace questions, use ipc_call against plugin://local/workspace list/search/read before considering shell execution.",
+  "For local web page inspection, use registry-discovered browser plugin read_page when it is configured.",
   "Workspace write/edit and shell exec are high-risk; ipc_call will request human approval before forwarding those actions.",
   "Keep final answers concise and mention which files or commands were used.",
 ].join("\n");
@@ -141,6 +150,7 @@ export function resolveSlockWebDaemonConfig(config: Partial<SlockWebDaemonConfig
   const workspaceUri = config.plugins?.workspace?.uri ?? "plugin://local/workspace";
   const shellUri = config.plugins?.shell?.uri ?? "plugin://local/shell";
   const calculatorUri = config.plugins?.calculator?.uri ?? "plugin://demo/calculator";
+  const browserUri = config.plugins?.browser?.uri ?? "plugin://local/browser";
   const memoryUri = config.plugins?.memory?.uri ?? "plugin://memory/reme";
   const memoryBaseUrl = config.plugins?.memory?.base_url ?? readEnv(config.plugins?.memory?.base_url_env);
   const mentionAliases = config.channel?.mention_aliases ?? defaultMentionAliases(agents);
@@ -183,6 +193,14 @@ export function resolveSlockWebDaemonConfig(config: Partial<SlockWebDaemonConfig
       calculator: {
         enabled: config.plugins?.calculator?.enabled ?? hasAgentMode(agents, "mock"),
         uri: calculatorUri,
+      },
+      browser: {
+        enabled: config.plugins?.browser?.enabled ?? false,
+        uri: browserUri,
+        allowed_origins: config.plugins?.browser?.allowed_origins,
+        timeout_ms: config.plugins?.browser?.timeout_ms ?? 10000,
+        max_read_bytes: config.plugins?.browser?.max_read_bytes ?? 1024 * 128,
+        user_agent: config.plugins?.browser?.user_agent,
       },
       memory: {
         enabled: config.plugins?.memory?.enabled ?? Boolean(memoryBaseUrl),

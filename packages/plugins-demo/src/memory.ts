@@ -98,6 +98,27 @@ export function createReMeMemoryPlugin(options: ReMeMemoryPluginOptions): ReMeMe
   const timeoutMs = options.timeout_ms ?? 30000;
   const node = createNode(uri);
 
+  node.children([
+    {
+      uri: `${uri}/personal` as EndpointUri,
+      label: "personal memory",
+      kind: "namespace",
+      description: "Personal long-term memory namespace. Use the root retrieve/summarize actions with scope=personal after reading the root manifest.",
+    },
+    {
+      uri: `${uri}/task` as EndpointUri,
+      label: "task memory",
+      kind: "namespace",
+      description: "Task/project memory namespace. Use the root retrieve/summarize actions with scope=task after reading the root manifest.",
+    },
+    {
+      uri: `${uri}/tool` as EndpointUri,
+      label: "tool memory",
+      kind: "namespace",
+      description: "Tool-use memory namespace. Use retrieve_tool_guidelines, record_tool_result, or vector_store from the root manifest as appropriate.",
+    },
+  ]);
+
   if (provider !== "reme-http") {
     throw new Error(`unsupported memory provider: ${provider}`);
   }

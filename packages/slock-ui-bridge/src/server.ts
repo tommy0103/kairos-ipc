@@ -4,6 +4,7 @@ import { fileURLToPath, URL } from "node:url";
 import type { EndpointUri } from "../../protocol/src/index.ts";
 import { createNode, type IpcNode } from "../../sdk/src/index.ts";
 import type { ApprovalResolution, PendingApproval, SlockHumanEndpoint } from "../../slock-human/src/index.ts";
+import { buildTraceView, parseTraceJsonl, type TraceViewFilters } from "./trace-viewer.ts";
 import {
   SLOCK_CHANNEL_EVENT_MIME,
   SLOCK_MESSAGE_MIME,
@@ -29,6 +30,7 @@ export interface SlockUiBridgeOptions {
   uri?: string;
   history_limit?: number;
   asset_root?: string;
+  trace_path?: string;
 }
 
 export interface ListenOptions {
@@ -56,6 +58,7 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
   const channelUris = new Set(channels.map((channel) => channel.uri));
   const historyLimit = options.history_limit ?? 50;
   const assetRoot = resolve(options.asset_root ?? DEFAULT_ASSET_ROOT);
+  const tracePath = options.trace_path ? resolve(options.trace_path) : undefined;
   const clients = new Set<SseClient>();
   const approvalChannels = new Map<string, EndpointUri>();
   let server: Bun.Server | undefined;
@@ -164,6 +167,10 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
         });
       }
 
+      if (request.method === "GET" && url.pathname === "/api/trace") {
+        return await readTraceView(url);
+      }
+
       if (request.method === "POST" && url.pathname === "/api/messages") {
         const body = await readJsonBody(request);
         const channelUri = readChannelUri(url, body);
@@ -257,6 +264,37 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
         connection: "keep-alive",
       },
     });
+  }
+
+  async function readTraceView(url: URL): Promise<Response> {
+    const limit = readTraceLimit(url);
+    const filters = readTraceFilters(url);
+
+    if (!tracePath) {
+      return jsonResponse(200, {
+        available: false,
+        trace_path: null,
+        ...buildTraceView([], { limit, filters }),
+      });
+    }
+
+    try {
+      const traceText = await readFile(tracePath, "utf8");
+      return jsonResponse(200, {
+        available: true,
+        trace_path: tracePath,
+        ...buildTraceView(parseTraceJsonl(traceText), { limit, filters }),
+      });
+    } catch (error) {
+      if (isMissingFileError(error)) {
+        return jsonResponse(200, {
+          available: true,
+          trace_path: tracePath,
+          ...buildTraceView([], { limit, filters }),
+        });
+      }
+      throw error;
+    }
   }
 
   function broadcast(event: SlockChannelEvent | Record<string, unknown>): void {
@@ -524,6 +562,38 @@ function readApprovalResult(value: unknown): SlockApprovalResult {
     grant_ttl_ms: typeof value.grant_ttl_ms === "number" ? value.grant_ttl_ms : 60000,
     reason: typeof value.reason === "string" ? value.reason : undefined,
   };
+}
+
+function readTraceLimit(url: URL): number {
+  const raw = url.searchParams.get("limit");
+  if (!raw) return 250;
+
+  const limit = Number.parseInt(raw, 10);
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw new HttpError(400, "trace limit must be a positive integer");
+  }
+
+  return Math.min(limit, 1000);
+}
+
+function readTraceFilters(url: URL): TraceViewFilters {
+  return {
+    q: optionalSearchParam(url, "q"),
+    correlation_id: optionalSearchParam(url, "correlation_id"),
+    message_id: optionalSearchParam(url, "message_id"),
+    thread_id: optionalSearchParam(url, "thread_id"),
+    channel: optionalSearchParam(url, "channel"),
+    source: optionalSearchParam(url, "source"),
+    target: optionalSearchParam(url, "target"),
+    payload_kind: optionalSearchParam(url, "payload_kind"),
+    route_result: optionalSearchParam(url, "route_result"),
+    approval_id: optionalSearchParam(url, "approval_id"),
+  };
+}
+
+function optionalSearchParam(url: URL, name: string): string | undefined {
+  const value = url.searchParams.get(name)?.trim();
+  return value ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

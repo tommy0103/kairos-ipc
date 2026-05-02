@@ -417,6 +417,8 @@ test("pi-ai ipc_call tool describes registry and endpoint manifest discovery", (
   assert.equal(tool?.name, "ipc_call");
   assert.match(tool?.description ?? "", /slock:\/\/registry list_endpoints/);
   assert.match(tool?.description ?? "", /call its manifest action before endpoint-specific actions/);
+  assert.match(tool?.description ?? "", /manifest exposes list_children/);
+  assert.match(tool?.description ?? "", /call the child manifest before child-specific actions/);
   assert.match(tool?.description ?? "", /Leave timeout_ms and ttl_ms unset by default/);
   assert.match(tool?.description ?? "", /Known useful target URIs: slock:\/\/registry, plugin:\/\/demo\/calculator/);
   const parameters = JSON.stringify(tool?.parameters);
