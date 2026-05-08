@@ -10,9 +10,10 @@ import { Router } from "../../kernel/src/router.ts";
 import { TraceWriter } from "../../kernel/src/trace.ts";
 import { createUnixNdjsonKernel } from "../../kernel/src/transport/unix-ndjson.ts";
 import { createBrowserPlugin, createCalculatorPlugin, createReMeMemoryPlugin, createShellPlugin, createWorkspacePlugin } from "../../plugins-demo/src/index.ts";
-import type { ClientFrame, KernelFrame } from "../../protocol/src/index.ts";
+import type { ClientFrame, EndpointUri, KernelFrame } from "../../protocol/src/index.ts";
 import type { IpcNode } from "../../sdk/src/index.ts";
 import type { IpcTransport } from "../../sdk/src/transport.ts";
+import { createSessionManager } from "../../session-manager/src/index.ts";
 import { createSlockChannel, createSlockGrantStore } from "../../slock-channel/src/index.ts";
 import { createSlockHuman } from "../../slock-human/src/index.ts";
 import { createSlockUiBridge, type SlockUiBridge } from "../../slock-ui-bridge/src/index.ts";
@@ -26,6 +27,7 @@ export interface SlockWebDaemon {
   trace_path: string;
   ipc_address: string;
   registry_uri: string;
+  session_manager_uri?: string;
   agent_uri: string;
   agent_uris: string[];
   channel_uri: string;
@@ -46,6 +48,7 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
     : [{ uri: required(resolved.channel_uri, "channel_uri"), ...resolved.channel }];
   const channelUris = channelConfigs.map((channel) => required(channel.uri, "channels[].uri"));
   const channelUri = channelUris[0];
+  const sessionManagerUri = resolved.collaboration?.enabled === false ? undefined : required(resolved.collaboration?.session_manager_uri, "collaboration.session_manager_uri");
   const humanUri = required(resolved.human_uri, "human_uri");
   const agentConfigs = resolved.agents?.length ? resolved.agents : [required(resolved.agent, "agent")];
   const agentUris = agentConfigs.map((agent) => required(agent.uri, "agents[].uri"));
@@ -73,12 +76,21 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
     const channels = channelConfigs.map((channel) => createSlockChannel({
       uri: channel.uri,
       mention_aliases: channel.mention_aliases,
+      default_mentions: channel.default_mentions,
       history_limit: channel.history_limit,
+      session_manager_uri: sessionManagerUri,
     }));
-    const agents = agentConfigs.map((agent) => createDaemonAgent(agent, resolved, registryUri, workspaceUri, shellUri, calculatorUri, browserUri, memoryUri));
+    const sessionManager = sessionManagerUri
+      ? createSessionManager({
+        uri: sessionManagerUri,
+        default_agent_ttl_ms: resolved.collaboration?.default_agent_ttl_ms,
+        coordinator_uri: resolved.collaboration?.coordinator_uri,
+      })
+      : undefined;
+    const agents = agentConfigs.map((agent) => createDaemonAgent(agent, resolved, registryUri, workspaceUri, shellUri, calculatorUri, browserUri, memoryUri, sessionManagerUri));
     const registry = createSlockRegistry({
       uri: registryUri,
-      endpoints: registryEndpoints(resolved, humanUri, resolved.ui_uri, channelConfigs, agentConfigs, workspaceUri, shellUri, calculatorUri, browserUri, memoryUri),
+      endpoints: registryEndpoints(resolved, humanUri, resolved.ui_uri, sessionManagerUri, channelConfigs, agentConfigs, workspaceUri, shellUri, calculatorUri, browserUri, memoryUri),
     });
 
     bridge = createSlockUiBridge({
@@ -94,7 +106,14 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
       trace_path: tracePath,
     });
 
-    const nodes: IpcNode[] = [registry.node, human.node, bridge.node, ...channels.map((channel) => channel.node), ...agents.map((agent) => agent.node)];
+    const nodes: IpcNode[] = [
+      registry.node,
+      human.node,
+      bridge.node,
+      ...(sessionManager ? [sessionManager.node] : []),
+      ...channels.map((channel) => channel.node),
+      ...agents.map((agent) => agent.node),
+    ];
     if (resolved.plugins?.workspace?.enabled) {
       nodes.push(createWorkspacePlugin({
         uri: workspaceUri,
@@ -158,6 +177,7 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
       trace_path: tracePath,
       ipc_address: ipcAddress,
       registry_uri: registryUri,
+      session_manager_uri: sessionManagerUri,
       agent_uri: agentUri,
       agent_uris: agentUris,
       channel_uri: channelUri,
@@ -212,6 +232,7 @@ function createDaemonAgent(
   calculatorUri: string,
   browserUri: string,
   memoryUri: string,
+  sessionManagerUri?: EndpointUri,
 ): { node: IpcNode } {
   const uri = required(agent.uri, "agents[].uri");
   if (agent.mode === "mock") {
@@ -235,7 +256,7 @@ function createDaemonAgent(
       workspace_uri: workspaceUri,
       shell_uri: shellUri,
       memory_uri: memoryUri,
-      ipc_call_targets: [registryUri, ...enabledPluginUris(config, workspaceUri, shellUri, calculatorUri, browserUri, memoryUri)],
+      ipc_call_targets: [registryUri, ...enabledPluginUris(config, workspaceUri, shellUri, calculatorUri, browserUri, memoryUri), ...(sessionManagerUri ? [sessionManagerUri] : [])],
     }),
   });
 }
@@ -243,7 +264,11 @@ function createDaemonAgent(
 function resolvePiModel(agent: SlockWebAgentConfig): Model<Api> {
   const provider = agent.provider ?? "openai";
   const model = agent.model ?? "gpt-4o-mini";
-  return getModel(provider as never, model as never) as Model<Api>;
+  const resolved = getModel(provider as never, model as never) as Model<Api> | undefined;
+  if (!resolved) {
+    throw new Error(`unknown pi-ai model: provider=${provider} model=${model}`);
+  }
+  return agent.api ? { ...resolved, api: agent.api as Api } : resolved;
 }
 
 function enabledPluginUris(
@@ -267,6 +292,7 @@ function registryEndpoints(
   config: SlockWebDaemonConfig,
   humanUri: string,
   uiUri: string | undefined,
+  sessionManagerUri: EndpointUri | undefined,
   channels: Array<{ uri: string; label?: string; kind?: string }>,
   agents: SlockWebAgentConfig[],
   workspaceUri: string,
@@ -318,6 +344,14 @@ function registryEndpoints(
       : undefined,
     { uri: humanUri, kind: "human", label: "human", internal: true },
     uiUri ? { uri: uiUri, kind: "app", label: "Slock UI", internal: true } : undefined,
+    sessionManagerUri
+      ? {
+        uri: sessionManagerUri,
+        kind: "app",
+        label: "collaboration session manager",
+        description: "Owns collaboration sessions, delegations, artifacts, barriers, and agent context rendering.",
+      }
+      : undefined,
     ...channels.map((channel) => ({
       uri: channel.uri,
       kind: "channel" as const,

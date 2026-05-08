@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["packages/slock-ui-bridge/web/src/*"],
+      "@kairos-ipc/chromatix": ["packages/chromatix/src/index.ts"],
+      "@kairos-ipc/chromatix-vue": ["packages/chromatix-vue/src/index.ts"],
+      "@kairos-ipc/unocss-preset-chromatix": ["packages/chromatix-unocss/src/index.ts"]
+    }
+  }
+}

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { Activity, Bot, Check, ChevronRight, CornerDownRight, MessageSquare, RefreshCw, Search, Send, ShieldAlert, TerminalSquare, X } from "lucide-vue-next";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 
 type EndpointUri = string;
@@ -6,6 +7,9 @@ type ActiveView = "chat" | "agent" | "trace";
 type RowClass = "delta" | "error";
 type RunState = "active" | "cancelling" | "cancelled" | "completed";
 type ToolState = "running" | "completed" | "errored";
+type AgentStatusState = "running" | "streaming" | "completed" | "errored" | "cancelled";
+type AgentStatusVisualState = AgentStatusState | "waiting";
+type EndpointKind = "agent" | "app" | "plugin" | "local" | "unknown";
 
 interface SlockUiBridgeChannel {
   uri: EndpointUri;
@@ -32,6 +36,22 @@ interface SlockMessageDelta {
   source: EndpointUri;
   kind?: "text" | "status";
   metadata?: Record<string, unknown>;
+}
+
+interface SlockAgentRunEvent {
+  run_id: string;
+  message_id: string;
+  thread_id?: string | null;
+  agent: EndpointUri;
+  state: "started" | "completed" | "errored" | "cancelled";
+  started_at?: string;
+  finished_at?: string;
+  final_message_id?: string;
+  reason?: string;
+  error?: {
+    code: string;
+    message: string;
+  };
 }
 
 interface SlockApprovalRequest {
@@ -78,6 +98,8 @@ interface SlockChannelEvent {
     | "message_created"
     | "message_updated"
     | "message_delta"
+    | "agent_run_started"
+    | "agent_run_finished"
     | "typing_started"
     | "approval_requested"
     | "approval_resolved"
@@ -88,6 +110,7 @@ interface SlockChannelEvent {
   channels?: SlockUiBridgeChannel[];
   message?: SlockMessage;
   delta?: SlockMessageDelta;
+  run?: SlockAgentRunEvent;
   error?: {
     code: string;
     message: string;
@@ -237,6 +260,8 @@ interface ToolRow {
   source: EndpointUri;
   threadId: string;
   threadReply: boolean;
+  receivedAt?: string;
+  sequence?: number;
   toolCallId: string;
   state: ToolState;
   name: string;
@@ -255,7 +280,19 @@ interface AgentStatusRow {
   channel?: EndpointUri;
   source: EndpointUri;
   threadId: string;
+  threadReply: boolean;
+  receivedAt?: string;
+  sequence?: number;
+  runId?: string;
+  messageId?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  lastActivityAt?: string;
+  finalMessageId?: string;
+  errorMessage?: string;
+  state: AgentStatusState;
   text: string;
+  synthetic?: boolean;
 }
 
 interface ApprovalRow {
@@ -264,7 +301,7 @@ interface ApprovalRow {
   approval: SlockApprovalEvent;
 }
 
-type UiRow = SimpleRow | MessageRow | ToolRow | ApprovalRow;
+type UiRow = SimpleRow | MessageRow | ApprovalRow | AgentStatusRow;
 type AgentActivityRow = ToolRow | AgentStatusRow;
 
 const timeline = ref<HTMLDivElement | null>(null);
@@ -281,6 +318,7 @@ const messageText = ref("@pi read package.json and summarize the scripts");
 const activeThreadId = ref<string | null>(null);
 const activeReplyToId = ref<string | null>(null);
 const activeThreadLabel = ref("");
+const clockTick = ref(Date.now());
 const traceLimit = ref(250);
 const traceQuery = ref("");
 const traceState = reactive<TraceState>({
@@ -295,24 +333,37 @@ const traceState = reactive<TraceState>({
 
 const rendered = new Set<string>();
 const streamRows = new Map<string, SimpleRow>();
+const statusRows = new Map<string, AgentStatusRow>();
 const toolRows = new Map<string, ToolRow>();
 const approvalById = new Map<string, SlockApprovalEvent>();
 const pendingToolApprovals = new Map<string, SlockApprovalEvent>();
 const typingTimers = new Map<string, number>();
 let nextEphemeralRowId = 1;
 let nextAgentStatusRowId = 1;
+let nextOperationSequence = 1;
 let events: EventSource | undefined;
+let clockTimer: number | undefined;
 
 const channelTitle = computed(() => activeChannel.value ? channelLabel(activeChannel.value) : "Slock");
+const latestOperations = computed(() => agentActivityRows.value
+  .slice()
+  .sort((left, right) => (right.sequence ?? 0) - (left.sequence ?? 0))
+  .slice(0, 14));
+const currentOperation = computed(() => latestOperations.value[0] ?? null);
+const previousOperations = computed(() => latestOperations.value.slice(1));
 const activeAgentRows = computed(() => agentActivityRows.value.filter((row) => row.source === activeAgentUri.value));
 const activeAgentToolCount = computed(() => activeAgentRows.value.filter((row) => row.rowType === "tool").length);
 const activeAgentApprovalCount = computed(() => activeAgentRows.value.filter((row) => row.rowType === "tool" && row.approval).length);
+const activeOperationCount = computed(() => agentActivityRows.value.filter((row) => row.rowType === "tool" ? row.state === "running" : row.state === "running" || row.state === "streaming").length);
+const pendingApprovalCount = computed(() => rows.value.filter((row) => row.rowType === "approval").length
+  + agentActivityRows.value.filter((row) => row.rowType === "tool" && Boolean(row.approval) && !row.approvalResult).length);
 const traceStatus = computed(() => {
   if (traceState.loading) return "loading trace";
   if (traceState.error) return "trace error";
   if (!traceState.available) return "trace unavailable";
   return `${traceState.stats.total_events} events in ${traceState.stats.group_count} groups`;
 });
+const traceIssueCount = computed(() => traceState.events.filter((event) => traceIsIssue(event)).length);
 const workspaceTitle = computed(() => {
   if (activeView.value === "trace") return "Trace";
   if (activeView.value === "agent") return activeAgentUri.value ?? "Agent";
@@ -325,6 +376,9 @@ const workspaceStatus = computed(() => {
 });
 
 onMounted(() => {
+  clockTimer = window.setInterval(() => {
+    clockTick.value = Date.now();
+  }, 1000);
   events = new EventSource("/events");
   events.onopen = () => setStatus("connected");
   events.onerror = () => setStatus("reconnecting");
@@ -335,6 +389,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   events?.close();
+  if (clockTimer) window.clearInterval(clockTimer);
   for (const timer of typingTimers.values()) window.clearTimeout(timer);
 });
 
@@ -393,10 +448,34 @@ function agentLabel(uri: EndpointUri): string {
   return "@ " + (uri.split("/").filter(Boolean).pop() || uri);
 }
 
+function endpointLabel(uri: EndpointUri): string {
+  const parts = uri.split("/").filter(Boolean);
+  return parts.at(-1) ?? uri;
+}
+
+function messageActorLabel(message: SlockMessage): string {
+  if (message.kind === "human") return endpointLabel(message.sender);
+  if (message.kind === "agent") return "@" + endpointLabel(message.sender);
+  return endpointLabel(message.sender);
+}
+
+function messageRoleLabel(message: SlockMessage): string {
+  if (message.kind === "human") return "human";
+  if (message.kind === "agent") return "agent";
+  return "system";
+}
+
+function messageTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
 function resetTimeline(): void {
   for (const timer of typingTimers.values()) window.clearTimeout(timer);
   rendered.clear();
   streamRows.clear();
+  statusRows.clear();
   toolRows.clear();
   agentActivityRows.value = [];
   knownAgents.value = [];
@@ -404,6 +483,7 @@ function resetTimeline(): void {
   pendingToolApprovals.clear();
   typingTimers.clear();
   rows.value = [];
+  nextOperationSequence = 1;
 }
 
 function insertRow<T extends UiRow>(row: T): T {
@@ -414,15 +494,83 @@ function insertRow<T extends UiRow>(row: T): T {
 }
 
 function insertAgentActivityRow<T extends AgentActivityRow>(row: T): T {
+  row.receivedAt = row.receivedAt ?? new Date().toISOString();
+  row.sequence = row.sequence ?? nextOperationSequence++;
   const reactiveRow = reactive(row) as T;
   agentActivityRows.value.push(reactiveRow);
   rememberAgent(row.source);
   return reactiveRow;
 }
 
-function ensureToolRowInChat(row: ToolRow): void {
-  if (rows.value.some((entry) => entry.rowType === "tool" && entry.id === row.id)) return;
-  rows.value.push(row);
+function ensureAgentStatusRow(row: Omit<AgentStatusRow, "rowType" | "id">): AgentStatusRow {
+  const id = statusKeyFromParts(row.source, row.threadId);
+  let existing = statusRows.get(id);
+  if (!existing) {
+    existing = insertRow({
+      rowType: "agent-status",
+      id,
+      ...row,
+    });
+    statusRows.set(id, existing);
+    return existing;
+  }
+
+  existing.channel = row.channel;
+  existing.threadReply = row.threadReply;
+  existing.receivedAt = row.receivedAt ?? existing.receivedAt;
+  existing.sequence = row.sequence ?? existing.sequence;
+  existing.runId = row.runId ?? existing.runId;
+  existing.messageId = row.messageId ?? existing.messageId;
+  existing.startedAt = row.startedAt ?? existing.startedAt;
+  existing.finishedAt = row.finishedAt ?? existing.finishedAt;
+  existing.lastActivityAt = row.lastActivityAt ?? row.receivedAt ?? existing.lastActivityAt;
+  existing.finalMessageId = row.finalMessageId ?? existing.finalMessageId;
+  existing.errorMessage = row.errorMessage ?? existing.errorMessage;
+  existing.state = row.state;
+  existing.text = row.text;
+  existing.synthetic = row.synthetic;
+  scrollTimeline();
+  return existing;
+}
+
+function ensureAgentStatusRowForTool(row: ToolRow): void {
+  const id = statusKeyFromParts(row.source, row.threadId);
+  const existing = statusRows.get(id);
+  const receivedAt = row.receivedAt ?? new Date().toISOString();
+
+  if (!existing) {
+    ensureAgentStatusRow({
+      channel: row.channel,
+      source: row.source,
+      threadId: row.threadId,
+      threadReply: row.threadReply,
+      messageId: row.threadId,
+      receivedAt,
+      lastActivityAt: receivedAt,
+      state: row.state === "errored" ? "errored" : "running",
+      text: row.state === "errored" ? "Tool call failed." : row.state === "running" ? "Using tool." : "Tool call completed.",
+      synthetic: true,
+    });
+    return;
+  }
+
+  const wasCompleted = existing.state === "completed";
+  existing.channel = row.channel;
+  existing.threadReply = row.threadReply;
+  existing.messageId = existing.messageId ?? row.threadId;
+  existing.lastActivityAt = receivedAt;
+  if (row.state === "running") {
+    existing.state = "running";
+    if (existing.synthetic || wasCompleted) {
+      existing.text = "Using tool.";
+      existing.synthetic = true;
+    }
+  } else if (row.state === "errored") {
+    existing.state = "errored";
+    if (existing.synthetic) existing.text = "Tool call failed.";
+  } else if (existing.synthetic) {
+    existing.text = "Tool call completed.";
+  }
   scrollTimeline();
 }
 
@@ -446,6 +594,10 @@ function removeRow(id: string): void {
 
 function streamKey(delta: SlockMessageDelta): string {
   return "stream:" + delta.source + ":" + delta.thread_id;
+}
+
+function statusKeyFromParts(source: EndpointUri, threadId: string): string {
+  return "agent-status:" + source + ":" + threadId;
 }
 
 function toolKeyFromParts(source: EndpointUri, threadId: string, toolCallId: string): string {
@@ -475,6 +627,12 @@ function isToolMetadata(value: unknown): value is ToolMetadata {
     && typeof value.name === "string";
 }
 
+function agentStatusState(metadata: unknown): AgentStatusState {
+  if (!isRecord(metadata)) return "running";
+  const state = metadata.phase_state;
+  return state === "streaming" || state === "completed" || state === "errored" ? state : "running";
+}
+
 function formatValue(value: unknown): string {
   if (typeof value === "string") return value;
   try {
@@ -489,6 +647,7 @@ function truncate(value: string, maxLength: number): string {
 }
 
 function compactText(value: unknown): string {
+  if (isRecord(value) || Array.isArray(value)) return formatValue(value).replace(/\s+/g, " ").trim();
   return String(value ?? "").replace(/\s+/g, " ").trim();
 }
 
@@ -711,6 +870,7 @@ function renderToolDelta(delta: SlockMessageDelta, tool: ToolMetadata): void {
   if (pendingApproval) {
     attachApprovalToToolRow(row, pendingApproval);
   }
+  ensureAgentStatusRowForTool(row);
 }
 
 function updateToolRow(row: ToolRow, tool: ToolMetadata): void {
@@ -732,7 +892,7 @@ function attachApprovalToToolRow(row: ToolRow, approval: SlockApprovalEvent): vo
   row.approval = approval;
   row.approvalResult = undefined;
   row.open = true;
-  ensureToolRowInChat(row);
+  ensureAgentStatusRowForTool(row);
 }
 
 function updateToolApproval(row: ToolRow, result: SlockApprovalResult): boolean {
@@ -786,6 +946,91 @@ function renderApprovalResolved(id: string, result: SlockApprovalResult): void {
   approvalById.delete(id);
   const summary = grantSummary(result);
   appendSimpleRow("delta", "approval", (result.approved ? "Approved" : "Denied") + (summary ? "\n" + summary : ""));
+}
+
+function renderAgentRunStarted(run: SlockAgentRunEvent): void {
+  rememberAgent(run.agent);
+  const receivedAt = run.started_at ?? new Date().toISOString();
+  const activity: AgentStatusRow = insertAgentActivityRow({
+    rowType: "agent-status",
+    id: `agent-run:${run.run_id}:started`,
+    channel: activeChannel.value?.uri,
+    source: run.agent,
+    threadId: run.message_id,
+    threadReply: Boolean(run.thread_id),
+    runId: run.run_id,
+    messageId: run.message_id,
+    startedAt: receivedAt,
+    lastActivityAt: receivedAt,
+    state: "running",
+    text: "Run started.",
+  });
+
+  ensureAgentStatusRow({
+    channel: activity.channel,
+    source: activity.source,
+    threadId: activity.threadId,
+    threadReply: activity.threadReply,
+    receivedAt: activity.receivedAt,
+    sequence: activity.sequence,
+    runId: run.run_id,
+    messageId: run.message_id,
+    startedAt: receivedAt,
+    lastActivityAt: receivedAt,
+    state: "running",
+    text: "Run started.",
+    synthetic: false,
+  });
+}
+
+function renderAgentRunFinished(run: SlockAgentRunEvent): void {
+  rememberAgent(run.agent);
+  const receivedAt = run.finished_at ?? new Date().toISOString();
+  const state = run.state === "started" ? "running" : run.state;
+  const text = agentRunText(run);
+  const activity: AgentStatusRow = insertAgentActivityRow({
+    rowType: "agent-status",
+    id: `agent-run:${run.run_id}:finished`,
+    channel: activeChannel.value?.uri,
+    source: run.agent,
+    threadId: run.message_id,
+    threadReply: Boolean(run.thread_id),
+    runId: run.run_id,
+    messageId: run.message_id,
+    startedAt: run.started_at,
+    finishedAt: receivedAt,
+    lastActivityAt: receivedAt,
+    finalMessageId: run.final_message_id,
+    errorMessage: run.error?.message,
+    state,
+    text,
+  });
+
+  ensureAgentStatusRow({
+    channel: activity.channel,
+    source: activity.source,
+    threadId: activity.threadId,
+    threadReply: activity.threadReply,
+    receivedAt: activity.receivedAt,
+    sequence: activity.sequence,
+    runId: run.run_id,
+    messageId: run.message_id,
+    startedAt: run.started_at,
+    finishedAt: receivedAt,
+    lastActivityAt: receivedAt,
+    finalMessageId: run.final_message_id,
+    errorMessage: run.error?.message,
+    state,
+    text,
+    synthetic: false,
+  });
+}
+
+function agentRunText(run: SlockAgentRunEvent): string {
+  if (run.state === "completed") return "Run completed.";
+  if (run.state === "cancelled") return "Run cancelled" + (run.reason ? ": " + run.reason : ".");
+  if (run.state === "errored") return run.error?.message ? "Run failed: " + run.error.message : "Run failed.";
+  return "Run started.";
 }
 
 function renderMessage(message: SlockMessage): void {
@@ -861,6 +1106,17 @@ function markRunFinished(messageId: string, state: "cancelled" | "completed"): v
   row.runState = state;
 }
 
+function markAgentStatusCancelled(agent: EndpointUri, messageId: string, reason?: string): void {
+  const row = statusRows.get(statusKeyFromParts(agent, messageId));
+  if (!row) return;
+  const receivedAt = new Date().toISOString();
+  row.state = "cancelled";
+  row.finishedAt = row.finishedAt ?? receivedAt;
+  row.lastActivityAt = receivedAt;
+  row.text = "Run cancelled" + (reason ? ": " + reason : ".");
+  row.synthetic = false;
+}
+
 function renderDelta(delta: SlockMessageDelta): void {
   rememberAgent(delta.source);
   if (delta.kind === "status") {
@@ -869,13 +1125,31 @@ function renderDelta(delta: SlockMessageDelta): void {
       return;
     }
 
-    insertAgentActivityRow({
+    const state = agentStatusState(delta.metadata);
+
+    const activityRow: AgentStatusRow = insertAgentActivityRow({
       rowType: "agent-status",
       id: `agent-status:${nextAgentStatusRowId++}`,
       channel: activeChannel.value?.uri,
       source: delta.source,
       threadId: delta.thread_id,
+      threadReply: Boolean(delta.thread_id),
+      state,
       text: delta.text,
+    });
+
+    ensureAgentStatusRow({
+      channel: activityRow.channel,
+      source: activityRow.source,
+      threadId: activityRow.threadId,
+      threadReply: activityRow.threadReply,
+      messageId: activityRow.threadId,
+      receivedAt: activityRow.receivedAt,
+      sequence: activityRow.sequence,
+      lastActivityAt: activityRow.receivedAt,
+      state,
+      text: delta.text,
+      synthetic: false,
     });
     return;
   }
@@ -913,6 +1187,14 @@ function renderEvent(event: SlockChannelEvent): void {
     renderDelta(event.delta);
     return;
   }
+  if (event.type === "agent_run_started" && event.run) {
+    renderAgentRunStarted(event.run);
+    return;
+  }
+  if (event.type === "agent_run_finished" && event.run) {
+    renderAgentRunFinished(event.run);
+    return;
+  }
   if (event.type === "typing_started" && event.typing) {
     renderTypingStarted(event.typing);
     return;
@@ -929,6 +1211,7 @@ function renderEvent(event: SlockChannelEvent): void {
   if (event.type === "agent_cancelled" && event.cancelled) {
     rememberAgent(event.cancelled.agent);
     markRunFinished(event.cancelled.message_id, "cancelled");
+    markAgentStatusCancelled(event.cancelled.agent, event.cancelled.message_id, event.cancelled.reason);
     appendSimpleRow("delta", event.cancelled.agent, "Cancelled" + (event.cancelled.reason ? ": " + event.cancelled.reason : ""));
     return;
   }
@@ -1071,6 +1354,167 @@ function approvalLabel(row: ToolRow): string {
   return row.approvalResult.approved ? "approved" : "denied";
 }
 
+function agentStatusLabel(row: AgentStatusRow): string {
+  if (agentStatusVisualState(row) === "waiting") return "waiting";
+  return row.state === "streaming" ? "active" : row.state;
+}
+
+function agentStatusVisualState(row: AgentStatusRow): AgentStatusVisualState {
+  return pendingStatusApprovals(row).length > 0 ? "waiting" : row.state;
+}
+
+function pendingStatusApprovals(row: AgentStatusRow): ToolRow[] {
+  return statusToolRows(row).filter((tool) => Boolean(tool.approval) && !tool.approvalResult);
+}
+
+function agentStatusMetaChips(row: AgentStatusRow): string[] {
+  const chips: string[] = [];
+  const duration = agentRunDuration(row);
+  const tools = statusToolRows(row).length;
+  const pending = pendingStatusApprovals(row).length;
+  if (duration) chips.push("elapsed " + duration);
+  if (row.lastActivityAt) chips.push("last " + compactTime(row.lastActivityAt));
+  chips.push(`${tools} tool${tools === 1 ? "" : "s"}`);
+  if (pending) chips.push(`${pending} approval${pending === 1 ? "" : "s"}`);
+  if (row.runId) chips.push("run " + shortRunId(row.runId));
+  return chips;
+}
+
+function agentRunDuration(row: AgentStatusRow): string {
+  const started = parseTimeMs(row.startedAt);
+  if (started === undefined) return "";
+  const finished = parseTimeMs(row.finishedAt);
+  const end = finished ?? clockTick.value;
+  return formatDurationMs(Math.max(0, end - started));
+}
+
+function parseTimeMs(value?: string): number | undefined {
+  if (!value) return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function formatDurationMs(ms: number): string {
+  if (ms < 1000) return "<1s";
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  if (minutes < 60) return `${minutes}m ${String(remainder).padStart(2, "0")}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+function compactTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "00:00:00";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function shortRunId(value: string): string {
+  return value.length > 12 ? value.slice(0, 12) : value;
+}
+
+function operationTitle(row: AgentActivityRow): string {
+  return row.rowType === "agent-status" ? row.text : `${toolInlineEndpointLabel(row)} ${toolInlineAction(row)}`;
+}
+
+function operationDetail(row: AgentActivityRow): string {
+  if (row.rowType === "agent-status") {
+    const duration = agentRunDuration(row);
+    const tools = statusToolRows(row).length;
+    return [endpointLabel(row.source), duration, `${tools} tools`].filter(Boolean).join(" · ");
+  }
+  return toolInlinePayload(row) || row.resultSummary || row.toolCallId;
+}
+
+function operationState(row: AgentActivityRow): string {
+  return row.rowType === "agent-status" ? agentStatusLabel(row) : row.state;
+}
+
+function operationTime(row: AgentActivityRow): string {
+  if (!row.receivedAt) return "00:00:00";
+  const date = new Date(row.receivedAt);
+  if (Number.isNaN(date.getTime())) return "00:00:00";
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function operationSequence(row: AgentActivityRow): string {
+  return "#" + String(row.sequence ?? 0).padStart(2, "0");
+}
+
+function operationIcon(row: AgentActivityRow): "status" | "approval" | "tool" | "terminal" {
+  if (row.rowType === "agent-status") return "status";
+  if (row.approval && !row.approvalResult) return "approval";
+  return row.name.includes("shell") || row.preview.startsWith("exec") ? "terminal" : "tool";
+}
+
+function endpointKind(uri: string): EndpointKind {
+  if (uri.startsWith("agent://")) return "agent";
+  if (uri.startsWith("app://")) return "app";
+  if (uri.startsWith("plugin://")) return "plugin";
+  if (uri.startsWith("local://")) return "local";
+  return "unknown";
+}
+
+function endpointDisplayLabel(uri: string): string {
+  const schemeIndex = uri.indexOf("://");
+  return schemeIndex >= 0 ? uri.slice(schemeIndex + 3) : uri;
+}
+
+function toolCallParts(row: ToolRow): { endpoint: string; action: string; payload: unknown } {
+  const args = toolArguments(row);
+  const approvalCall = row.approval?.request.proposed_call;
+  const endpoint = isRecord(args) && typeof args.target === "string"
+    ? args.target
+    : approvalCall?.target ?? row.preview;
+  const action = isRecord(args) && typeof args.action === "string"
+    ? args.action
+    : approvalCall?.action ?? row.name;
+  const payload = isRecord(args) && Object.prototype.hasOwnProperty.call(args, "payload")
+    ? args.payload
+    : approvalCall?.payload;
+  return { endpoint, action, payload };
+}
+
+function toolInlineEndpoint(row: ToolRow): string {
+  return toolCallParts(row).endpoint || endpointLabel(row.source);
+}
+
+function toolInlineEndpointLabel(row: ToolRow): string {
+  return endpointDisplayLabel(toolInlineEndpoint(row));
+}
+
+function toolInlineEndpointKind(row: ToolRow): EndpointKind {
+  return endpointKind(toolInlineEndpoint(row));
+}
+
+function toolInlineAction(row: ToolRow): string {
+  return toolCallParts(row).action || row.name;
+}
+
+function toolInlinePayload(row: ToolRow): string {
+  const payload = toolCallParts(row).payload;
+  if (payload === undefined) return "";
+  return truncate(compactText(payload), 180);
+}
+
+function statusToolRows(row: AgentStatusRow): ToolRow[] {
+  return agentActivityRows.value
+    .filter((entry): entry is ToolRow => entry.rowType === "tool" && entry.source === row.source && entry.threadId === row.threadId)
+    .slice()
+    .sort((left, right) => (right.sequence ?? 0) - (left.sequence ?? 0));
+}
+
+function currentStatusToolList(row: AgentStatusRow): ToolRow[] {
+  const current = statusToolRows(row)[0];
+  return current ? [current] : [];
+}
+
+function previousStatusTools(row: AgentStatusRow): ToolRow[] {
+  return statusToolRows(row).slice(1);
+}
+
 function toolArguments(row: ToolRow): unknown {
   return parseJsonMaybe(row.argumentsText);
 }
@@ -1125,12 +1569,38 @@ function traceRoute(event: TraceViewerEvent): string {
   return traceString(event.route_result) || traceString(event.event) || "event";
 }
 
+function traceIsIssue(event: TraceViewerEvent): boolean {
+  const route = traceRoute(event);
+  return route === "rejected" || route === "dropped" || route === "parse_error" || Boolean(traceString(event.error_reason));
+}
+
+function traceTone(event: TraceViewerEvent): "issue" | "response" | "stream" | "event" {
+  if (traceIsIssue(event)) return "issue";
+  const direction = traceDirection(event);
+  if (direction === "response") return "response";
+  if (direction === "stream") return "stream";
+  return "event";
+}
+
 function traceDirection(event: TraceViewerEvent): string {
   return traceString(event.direction) || "event";
 }
 
 function traceFlow(event: TraceViewerEvent): string {
   return traceString(event.endpoint_flow) || traceEndpoint(event);
+}
+
+function tracePrimaryLine(event: TraceViewerEvent): string {
+  const operation = traceOperation(event);
+  const flow = traceFlow(event);
+  return operation + (flow !== "-" ? " · " + flow : "");
+}
+
+function traceGroupLabel(event: TraceViewerEvent): string {
+  const group = traceString(event.group_key);
+  if (!group) return "ungrouped";
+  const separator = group.indexOf(":");
+  return separator >= 0 ? group.slice(separator + 1) : group;
 }
 
 function traceDepthStyle(event: TraceViewerEvent): Record<string, string> {
@@ -1202,177 +1672,443 @@ function errorMessage(error: unknown): string {
 </script>
 
 <template>
-  <main class="shell">
-    <section class="sidebar" aria-label="Channels">
-      <div class="brand">Slock IPC</div>
-      <div class="nav-label">Channels</div>
-      <div class="channel-list">
-        <button
-          v-for="channel in channels"
-          :key="channel.uri"
-          class="channel"
-          :class="{ active: activeView === 'chat' && activeChannel?.uri === channel.uri }"
-          type="button"
-          @click="switchChannel(channel.uri)"
-        >
-          {{ channelLabel(channel) }}
-        </button>
+  <main class="app-shell">
+    <aside class="navigation-rail" aria-label="Workspace navigation">
+      <div class="brand-lockup">
+        <span class="brand-glyph" aria-hidden="true"><MessageSquare :size="18" /></span>
+        <span class="brand-copy">
+          <span class="brand-name">Kairos</span>
+          <span class="brand-caption">Slock bridge</span>
+        </span>
       </div>
-      <div v-if="knownAgents.length" class="nav-label nav-label-spaced">Agents</div>
-      <div v-if="knownAgents.length" class="channel-list">
-        <button
-          v-for="agent in knownAgents"
-          :key="agent"
-          class="channel"
-          :class="{ active: activeView === 'agent' && activeAgentUri === agent }"
-          type="button"
-          @click="openAgentDashboard(agent)"
-        >
-          {{ agentLabel(agent) }}
-        </button>
-      </div>
-      <div class="nav-label nav-label-spaced">Observe</div>
-      <div class="channel-list">
-        <button
-          class="channel"
-          :class="{ active: activeView === 'trace' }"
-          type="button"
-          @click="openTraceViewer"
-        >
-          Trace
-        </button>
-      </div>
-    </section>
+
+      <section class="nav-section" aria-label="Rooms">
+        <div class="nav-heading">
+          <span>Rooms</span>
+          <span>{{ channels.length }}</span>
+        </div>
+        <div class="nav-list">
+          <button
+            v-for="channel in channels"
+            :key="channel.uri"
+            class="nav-item"
+            :class="{ active: activeView === 'chat' && activeChannel?.uri === channel.uri }"
+            type="button"
+            @click="switchChannel(channel.uri)"
+          >
+            <MessageSquare v-if="channel.kind !== 'dm'" :size="16" aria-hidden="true" />
+            <Bot v-else :size="16" aria-hidden="true" />
+            <span>{{ channelLabel(channel) }}</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="nav-section" aria-label="Agents">
+        <div class="nav-heading">
+          <span>Agents</span>
+          <span>{{ knownAgents.length }}</span>
+        </div>
+        <div v-if="knownAgents.length" class="nav-list">
+          <button
+            v-for="agent in knownAgents"
+            :key="agent"
+            class="nav-item"
+            :class="{ active: activeView === 'agent' && activeAgentUri === agent }"
+            type="button"
+            @click="openAgentDashboard(agent)"
+          >
+            <Bot :size="16" aria-hidden="true" />
+            <span>{{ agentLabel(agent) }}</span>
+          </button>
+        </div>
+        <div v-else class="nav-empty">Agents appear after a run starts.</div>
+      </section>
+
+      <section class="nav-section nav-section-bottom" aria-label="Observe">
+        <div class="nav-heading">
+          <span>Observe</span>
+        </div>
+        <div class="nav-list">
+          <button
+            class="nav-item"
+            :class="{ active: activeView === 'trace' }"
+            type="button"
+            @click="openTraceViewer"
+          >
+            <Activity :size="16" aria-hidden="true" />
+            <span>Trace</span>
+          </button>
+        </div>
+      </section>
+    </aside>
 
     <section class="workspace" :aria-label="activeView === 'agent' ? 'Agent dashboard' : activeView === 'trace' ? 'Trace viewer' : 'Channel'">
       <header class="topbar">
-        <div>
-          <div class="channel-title">{{ workspaceTitle }}</div>
-          <div class="status">{{ workspaceStatus }}</div>
+        <div class="workspace-heading">
+          <p class="workspace-kicker">{{ activeView === 'chat' ? 'Room' : activeView === 'agent' ? 'Agent' : 'Observe' }}</p>
+          <h1>{{ workspaceTitle }}</h1>
+          <p>{{ workspaceStatus }}</p>
         </div>
-        <button v-if="activeView === 'chat'" class="ghost" type="button" @click="refreshHistory">Refresh</button>
-        <button v-else-if="activeView === 'trace'" class="ghost" type="button" :disabled="traceState.loading" @click="refreshTrace">Refresh</button>
-        <button v-else class="ghost" type="button" @click="showChat">Channel</button>
+        <div class="topbar-actions">
+          <button v-if="activeView === 'chat'" class="ghost icon-label" type="button" @click="refreshHistory">
+            <RefreshCw :size="15" aria-hidden="true" />
+            <span>Refresh</span>
+          </button>
+          <button v-else-if="activeView === 'trace'" class="ghost icon-label" type="button" :disabled="traceState.loading" @click="refreshTrace">
+            <RefreshCw :size="15" aria-hidden="true" />
+            <span>Refresh</span>
+          </button>
+          <button v-else class="ghost icon-label" type="button" @click="showChat">
+            <MessageSquare :size="15" aria-hidden="true" />
+            <span>Channel</span>
+          </button>
+        </div>
       </header>
 
-      <div v-if="activeView === 'chat'" ref="timeline" class="timeline" aria-live="polite">
-        <template v-for="row in rows" :key="row.id">
-          <div
-            v-if="row.rowType === 'message'"
-            class="message"
-            :class="{ 'thread-reply': row.threadReply }"
-            :data-rendered-id="row.message.id"
-          >
-            <div class="meta">{{ row.message.sender }}</div>
-            <div class="text">
-              <span>{{ row.message.text }}</span>
-              <div class="message-actions">
-                <button
-                  v-if="canCancel(row)"
-                  type="button"
-                  :data-run-cancel-for="row.message.id"
-                  :disabled="cancelDisabled(row)"
-                  @click="cancelRun(row.message.id, row)"
-                >
-                  {{ cancelLabel(row) }}
-                </button>
-                <button type="button" @click="setActiveThread(row.message)">Reply</button>
-              </div>
+      <div v-if="activeView === 'chat'" class="collab-layout">
+        <section class="conversation-pane" aria-label="Conversation">
+          <div ref="timeline" class="timeline" aria-live="polite">
+            <div v-if="!rows.length" class="timeline-empty">
+              <div class="empty-title">No messages in this room yet</div>
+              <div class="empty-copy">Start with a mention, then agent replies, tool calls, and approvals will stay in the same timeline.</div>
             </div>
-          </div>
 
-          <div
-            v-else-if="row.rowType === 'simple'"
-            :class="[row.className, { 'thread-reply': row.threadReply }]"
-            :data-rendered-id="row.renderedId"
-          >
-            <div class="meta">{{ row.meta }}</div>
-            <div class="text">{{ row.text }}</div>
-          </div>
-
-          <div
-            v-else-if="row.rowType === 'tool'"
-            class="tool-call"
-            :class="{ 'thread-reply': row.threadReply }"
-            :data-tool-call-id="row.toolCallId"
-            :data-state="row.state"
-          >
-            <div class="meta">{{ row.source }}</div>
-            <details class="tool-details" :open="row.open" @toggle="syncToolOpen(row, $event)">
-              <summary class="tool-summary">
-                <span class="tool-state" :data-state="row.state">{{ row.state }}</span>
-                <span class="tool-name">{{ row.name }}</span>
-                <span class="tool-preview">{{ row.preview }}</span>
-              </summary>
-
-              <div v-if="row.approval" class="tool-section tool-approval" :data-approval-id="row.approval.id">
-                <div class="approval-header">
-                  <span class="approval-status" :data-state="approvalState(row)">{{ approvalLabel(row) }}</span>
-                  <span class="grant-summary">{{ grantSummary(row.approvalResult) }}</span>
+            <template v-for="row in rows" :key="row.id">
+              <article
+                v-if="row.rowType === 'message'"
+                class="message-row message"
+                :class="{ 'thread-reply': row.threadReply }"
+                :data-kind="row.message.kind"
+                :data-rendered-id="row.message.id"
+              >
+                <div class="actor-cell">
+                  <span class="actor-avatar" :data-kind="row.message.kind">{{ messageActorLabel(row.message).slice(0, 1).toUpperCase() }}</span>
+                  <span class="actor-meta">
+                    <span class="sender">{{ messageActorLabel(row.message) }}</span>
+                    <span class="meta">{{ messageRoleLabel(row.message) }} · {{ messageTime(row.message.created_at) }}</span>
+                  </span>
                 </div>
-                <div class="approval-card">
-                  <div class="approval-summary-line">{{ approvalRiskLabel(row.approval) }}: {{ row.approval.request.summary }}</div>
-                  <div class="approval-target-line">{{ approvalPayloadSummary(row.approval) }}</div>
-                  <div class="approval-chip-row">
-                    <span v-for="chip in approvalDetailChips(row.approval)" :key="chip" class="approval-chip">{{ chip }}</span>
+                <div class="message-body">
+                  <div class="text">{{ row.message.text }}</div>
+                  <div class="message-actions">
+                    <button
+                      v-if="canCancel(row)"
+                      class="subtle-button"
+                      type="button"
+                      :data-run-cancel-for="row.message.id"
+                      :disabled="cancelDisabled(row)"
+                      @click="cancelRun(row.message.id, row)"
+                    >
+                      <X v-if="row.runState === 'active'" :size="14" aria-hidden="true" />
+                      <Check v-else :size="14" aria-hidden="true" />
+                      <span>{{ cancelLabel(row) }}</span>
+                    </button>
+                    <button class="subtle-button" type="button" @click="setActiveThread(row.message)">
+                      <CornerDownRight :size="14" aria-hidden="true" />
+                      <span>Reply</span>
+                    </button>
                   </div>
                 </div>
-                <template v-if="diffPreview(row.approval)">
-                  <div class="tool-section-label">Diff Preview</div>
-                  <pre class="tool-pre">{{ diffPreview(row.approval) }}</pre>
-                </template>
-                <details class="raw-details">
-                  <summary>Raw payload</summary>
-                  <pre class="tool-pre">{{ approvalRawPayload(row.approval) }}</pre>
-                </details>
-                <div class="approval-actions">
-                  <button
-                    type="button"
-                    data-decision="approve"
-                    :disabled="Boolean(row.approvalResult)"
-                    @click="decideApproval(row.approval.id, true)"
-                  >Approve</button>
-                  <button
-                    type="button"
-                    data-decision="deny"
-                    :disabled="Boolean(row.approvalResult)"
-                    @click="decideApproval(row.approval.id, false)"
-                  >Deny</button>
-                </div>
-              </div>
+              </article>
 
-              <div v-if="row.resultText !== undefined" class="tool-section tool-result-section">
-                <div class="tool-section-label">Result</div>
-                <div class="tool-result-summary">{{ row.resultSummary }}</div>
-                <details v-if="row.resultText !== row.resultSummary" class="raw-details">
-                  <summary>Result detail</summary>
-                  <pre class="tool-pre tool-result">{{ row.resultText }}</pre>
-                </details>
-              </div>
-            </details>
+              <article
+                v-else-if="row.rowType === 'simple'"
+                :class="['system-row', row.className, { 'thread-reply': row.threadReply }]"
+                :data-rendered-id="row.renderedId"
+              >
+                <div class="actor-cell compact">
+                  <span class="activity-dot" :data-state="row.className"></span>
+                  <span class="meta">{{ endpointLabel(row.meta) }}</span>
+                </div>
+                <div class="message-body">
+                  <div class="text">{{ row.text }}</div>
+                </div>
+              </article>
+
+              <article
+                v-else-if="row.rowType === 'agent-status'"
+                class="agent-status-row"
+                :class="['activity-row', { 'thread-reply': row.threadReply }]"
+                :data-state="agentStatusVisualState(row)"
+              >
+                <div class="actor-cell compact">
+                  <span class="actor-avatar agent-avatar"><Bot :size="15" aria-hidden="true" /></span>
+                  <span class="actor-meta">
+                    <span class="sender">{{ endpointLabel(row.source) }}</span>
+                    <span class="meta">agent status</span>
+                  </span>
+                </div>
+                <div class="agent-status-block">
+                  <div class="agent-status-text">
+                    <span class="tool-state" :data-state="agentStatusVisualState(row)">{{ agentStatusLabel(row) }}</span>
+                    <span>{{ row.text }}</span>
+                  </div>
+                  <div class="agent-run-meta">
+                    <span v-for="chip in agentStatusMetaChips(row)" :key="chip" :title="chip.startsWith('run ') ? row.runId : undefined">{{ chip }}</span>
+                  </div>
+
+                  <details
+                    v-for="currentTool in currentStatusToolList(row)"
+                    :key="currentTool.id"
+                    class="agent-current-tool"
+                    :open="currentTool.open"
+                    :data-state="currentTool.state"
+                    @toggle="syncToolOpen(currentTool, $event)"
+                  >
+                    <summary class="agent-current-tool-summary">
+                      <ChevronRight class="details-chevron" :size="15" aria-hidden="true" />
+                      <span class="endpoint-kind-icon" :data-kind="toolInlineEndpointKind(currentTool)" :title="toolInlineEndpoint(currentTool)">
+                        <Bot v-if="toolInlineEndpointKind(currentTool) === 'agent'" :size="15" aria-hidden="true" />
+                        <MessageSquare v-else-if="toolInlineEndpointKind(currentTool) === 'app'" :size="15" aria-hidden="true" />
+                        <TerminalSquare v-else :size="15" aria-hidden="true" />
+                      </span>
+                      <span class="tool-inline-summary">
+                        <span class="tool-endpoint" :title="toolInlineEndpoint(currentTool)">{{ toolInlineEndpointLabel(currentTool) }}</span>
+                        <span class="tool-action">{{ toolInlineAction(currentTool) }}</span>
+                        <span v-if="toolInlinePayload(currentTool)" class="tool-payload">{{ toolInlinePayload(currentTool) }}</span>
+                      </span>
+                    </summary>
+
+                    <div class="agent-tool-detail-body">
+                      <div class="tool-call-detail">
+                        <span>endpoint</span>
+                        <code>{{ toolInlineEndpoint(currentTool) }}</code>
+                        <span>action</span>
+                        <code>{{ toolInlineAction(currentTool) }}</code>
+                        <span v-if="toolInlinePayload(currentTool)">payload</span>
+                        <pre v-if="toolInlinePayload(currentTool)" class="tool-pre inline-payload">{{ toolInlinePayload(currentTool) }}</pre>
+                        <span>arguments</span>
+                        <pre class="tool-pre inline-payload">{{ currentTool.argumentsText }}</pre>
+                        <span v-if="currentTool.resultText !== undefined">result</span>
+                        <pre v-if="currentTool.resultText !== undefined" class="tool-pre inline-payload">{{ currentTool.resultText }}</pre>
+                      </div>
+
+                      <div v-if="currentTool.approval" class="tool-section tool-approval" :data-approval-id="currentTool.approval.id">
+                        <div class="approval-header">
+                          <span class="approval-status" :data-state="approvalState(currentTool)">{{ approvalLabel(currentTool) }}</span>
+                          <span class="grant-summary">{{ grantSummary(currentTool.approvalResult) }}</span>
+                        </div>
+                        <div class="approval-card">
+                          <div class="approval-summary-line">{{ approvalRiskLabel(currentTool.approval) }}: {{ currentTool.approval.request.summary }}</div>
+                          <div class="approval-target-line">{{ approvalPayloadSummary(currentTool.approval) }}</div>
+                          <div class="approval-chip-row">
+                            <span v-for="chip in approvalDetailChips(currentTool.approval)" :key="chip" class="approval-chip">{{ chip }}</span>
+                          </div>
+                        </div>
+                        <template v-if="diffPreview(currentTool.approval)">
+                          <div class="tool-section-label">Diff Preview</div>
+                          <pre class="tool-pre">{{ diffPreview(currentTool.approval) }}</pre>
+                        </template>
+                        <details class="raw-details">
+                          <summary>Raw payload</summary>
+                          <pre class="tool-pre">{{ approvalRawPayload(currentTool.approval) }}</pre>
+                        </details>
+                        <div class="approval-actions">
+                          <button
+                            type="button"
+                            data-decision="approve"
+                            :disabled="Boolean(currentTool.approvalResult)"
+                            @click="decideApproval(currentTool.approval.id, true)"
+                          >
+                            <Check :size="14" aria-hidden="true" />
+                            <span>Approve</span>
+                          </button>
+                          <button
+                            type="button"
+                            data-decision="deny"
+                            :disabled="Boolean(currentTool.approvalResult)"
+                            @click="decideApproval(currentTool.approval.id, false)"
+                          >
+                            <X :size="14" aria-hidden="true" />
+                            <span>Deny</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  </details>
+
+                  <details v-if="previousStatusTools(row).length" class="previous-tool-calls agent-tool-history">
+                    <summary>
+                      <span>Tool history</span>
+                      <span>{{ previousStatusTools(row).length }}</span>
+                    </summary>
+                    <div class="previous-tool-list">
+                      <details
+                        v-for="previous in previousStatusTools(row)"
+                        :key="previous.id"
+                        class="previous-tool-call"
+                      >
+                        <summary>
+                          <span class="tool-state" :data-state="previous.state">{{ previous.state }}</span>
+                          <span class="tool-inline-summary">
+                            <span class="endpoint-kind-icon compact" :data-kind="toolInlineEndpointKind(previous)" :title="toolInlineEndpoint(previous)">
+                              <Bot v-if="toolInlineEndpointKind(previous) === 'agent'" :size="13" aria-hidden="true" />
+                              <MessageSquare v-else-if="toolInlineEndpointKind(previous) === 'app'" :size="13" aria-hidden="true" />
+                              <TerminalSquare v-else :size="13" aria-hidden="true" />
+                            </span>
+                            <span class="tool-endpoint" :title="toolInlineEndpoint(previous)">{{ toolInlineEndpointLabel(previous) }}</span>
+                            <span class="tool-action">{{ toolInlineAction(previous) }}</span>
+                            <span v-if="toolInlinePayload(previous)" class="tool-payload">{{ toolInlinePayload(previous) }}</span>
+                          </span>
+                        </summary>
+                        <div class="tool-call-detail previous-tool-detail">
+                          <span>endpoint</span>
+                          <code>{{ toolInlineEndpoint(previous) }}</code>
+                          <span>action</span>
+                          <code>{{ toolInlineAction(previous) }}</code>
+                          <span v-if="toolInlinePayload(previous)">payload</span>
+                          <pre v-if="toolInlinePayload(previous)" class="tool-pre inline-payload">{{ toolInlinePayload(previous) }}</pre>
+                          <span>arguments</span>
+                          <pre class="tool-pre inline-payload">{{ previous.argumentsText }}</pre>
+                          <span v-if="previous.resultText !== undefined">result</span>
+                          <pre v-if="previous.resultText !== undefined" class="tool-pre inline-payload">{{ previous.resultText }}</pre>
+                        </div>
+                      </details>
+                    </div>
+                  </details>
+                </div>
+              </article>
+
+              <article v-else-if="row.rowType === 'approval'" class="approval approval-row" :data-approval-id="row.approval.id">
+                <div class="actor-cell compact">
+                  <span class="actor-avatar approval-avatar"><ShieldAlert :size="15" aria-hidden="true" /></span>
+                  <span class="actor-meta">
+                    <span class="sender">Approval</span>
+                    <span class="meta">{{ row.approval.request.risk }}</span>
+                  </span>
+                </div>
+                <div class="message-body">
+                  <div class="approval-card">
+                    <div class="approval-summary-line">{{ approvalRiskLabel(row.approval) }}: {{ row.approval.request.summary }}</div>
+                    <div class="approval-target-line">{{ approvalPayloadSummary(row.approval) }}</div>
+                    <div class="approval-chip-row">
+                      <span v-for="chip in approvalDetailChips(row.approval)" :key="chip" class="approval-chip">{{ chip }}</span>
+                    </div>
+                  </div>
+                  <div class="approval-actions">
+                    <button type="button" data-decision="approve" @click="decideApproval(row.approval.id, true)">
+                      <Check :size="14" aria-hidden="true" />
+                      <span>Approve</span>
+                    </button>
+                    <button type="button" data-decision="deny" @click="decideApproval(row.approval.id, false)">
+                      <X :size="14" aria-hidden="true" />
+                      <span>Deny</span>
+                    </button>
+                  </div>
+                  <details class="raw-details compact">
+                    <summary>Raw payload</summary>
+                    <pre class="tool-pre">{{ approvalRawPayload(row.approval) }}</pre>
+                  </details>
+                </div>
+              </article>
+            </template>
           </div>
 
-          <div v-else class="approval" :data-approval-id="row.approval.id">
-            <div class="meta">{{ row.approval.request.risk }}</div>
-            <div class="text">
-              <div class="approval-card">
-                <div class="approval-summary-line">{{ approvalRiskLabel(row.approval) }}: {{ row.approval.request.summary }}</div>
-                <div class="approval-target-line">{{ approvalPayloadSummary(row.approval) }}</div>
-                <div class="approval-chip-row">
-                  <span v-for="chip in approvalDetailChips(row.approval)" :key="chip" class="approval-chip">{{ chip }}</span>
-                </div>
-              </div>
-              <div class="approval-actions">
-                <button type="button" data-decision="approve" @click="decideApproval(row.approval.id, true)">Approve</button>
-                <button type="button" data-decision="deny" @click="decideApproval(row.approval.id, false)">Deny</button>
-              </div>
-              <details class="raw-details compact">
-                <summary>Raw payload</summary>
-                <pre class="tool-pre">{{ approvalRawPayload(row.approval) }}</pre>
-              </details>
+          <form class="composer" @submit.prevent="submitMessage">
+            <div v-if="activeThreadId" class="thread-context">
+              <CornerDownRight :size="15" aria-hidden="true" />
+              <span class="thread-label">{{ activeThreadLabel }}</span>
+              <button class="icon-button" type="button" aria-label="Clear thread" @click="clearActiveThread()">
+                <X :size="15" aria-hidden="true" />
+              </button>
+            </div>
+            <textarea ref="messageInput" v-model="messageText" rows="2" autocomplete="off" placeholder="Message an agent or the room" />
+            <button class="send-button" type="submit">
+              <Send :size="16" aria-hidden="true" />
+              <span>Send</span>
+            </button>
+          </form>
+        </section>
+
+        <aside class="operations-pane" aria-label="Agent operations">
+          <div class="operations-header">
+            <div>
+              <p class="panel-kicker">Live work</p>
+              <h2>Operations</h2>
+            </div>
+            <span class="operation-count">{{ latestOperations.length }}</span>
+          </div>
+
+          <div class="operations-stats">
+            <div>
+              <span class="stat-value">{{ activeOperationCount }}</span>
+              <span class="stat-label">active</span>
+            </div>
+            <div>
+              <span class="stat-value">{{ pendingApprovalCount }}</span>
+              <span class="stat-label">pending</span>
+            </div>
+            <div>
+              <span class="stat-value">{{ knownAgents.length }}</span>
+              <span class="stat-label">agents</span>
             </div>
           </div>
-        </template>
+
+          <div v-if="currentOperation" class="operations-order">
+            <span>Current</span>
+            <span>Received</span>
+          </div>
+
+          <div v-if="currentOperation" class="operation-list current-operation" aria-label="Current operation">
+            <article class="operation-item" :data-state="operationState(currentOperation)">
+              <span class="operation-time">
+                <span class="operation-sequence">{{ operationSequence(currentOperation) }}</span>
+                <span class="operation-clock">{{ operationTime(currentOperation) }}</span>
+              </span>
+              <span class="operation-icon" :data-kind="operationIcon(currentOperation)">
+                <Activity v-if="operationIcon(currentOperation) === 'status'" :size="15" aria-hidden="true" />
+                <ShieldAlert v-else-if="operationIcon(currentOperation) === 'approval'" :size="15" aria-hidden="true" />
+                <TerminalSquare v-else-if="operationIcon(currentOperation) === 'terminal'" :size="15" aria-hidden="true" />
+                <Bot v-else :size="15" aria-hidden="true" />
+              </span>
+              <span class="operation-copy">
+                <span class="operation-title">{{ operationTitle(currentOperation) }}</span>
+                <span class="operation-detail">{{ operationDetail(currentOperation) }}</span>
+              </span>
+              <span class="operation-state">{{ operationState(currentOperation) }}</span>
+            </article>
+          </div>
+
+          <details v-if="previousOperations.length" class="operation-archive">
+            <summary>
+              <span>Previous operations</span>
+              <span>{{ previousOperations.length }}</span>
+            </summary>
+            <div class="operation-list archived-operations" aria-label="Previous operations">
+              <article
+                v-for="row in previousOperations"
+                :key="row.id"
+                class="operation-item"
+                :data-state="operationState(row)"
+              >
+                <span class="operation-time">
+                  <span class="operation-sequence">{{ operationSequence(row) }}</span>
+                  <span class="operation-clock">{{ operationTime(row) }}</span>
+                </span>
+                <span class="operation-icon" :data-kind="operationIcon(row)">
+                  <Activity v-if="operationIcon(row) === 'status'" :size="15" aria-hidden="true" />
+                  <ShieldAlert v-else-if="operationIcon(row) === 'approval'" :size="15" aria-hidden="true" />
+                  <TerminalSquare v-else-if="operationIcon(row) === 'terminal'" :size="15" aria-hidden="true" />
+                  <Bot v-else :size="15" aria-hidden="true" />
+                </span>
+                <span class="operation-copy">
+                  <span class="operation-title">{{ operationTitle(row) }}</span>
+                  <span class="operation-detail">{{ operationDetail(row) }}</span>
+                </span>
+                <span class="operation-state">{{ operationState(row) }}</span>
+              </article>
+            </div>
+          </details>
+          <div v-if="!currentOperation" class="operations-empty">
+            <Activity :size="16" aria-hidden="true" />
+            <span>No agent activity yet.</span>
+          </div>
+
+          <button class="trace-link" type="button" @click="openTraceViewer">
+            <Activity :size="15" aria-hidden="true" />
+            <span>Open trace</span>
+          </button>
+        </aside>
       </div>
 
       <div v-else-if="activeView === 'agent'" class="agent-dashboard">
@@ -1401,9 +2137,9 @@ function errorMessage(error: unknown): string {
           </div>
           <template v-for="row in activeAgentRows" :key="row.id">
             <article v-if="row.rowType === 'agent-status'" class="dashboard-status">
-              <span class="tool-state" data-state="running">status</span>
+              <span class="tool-state" :data-state="agentStatusVisualState(row)">{{ agentStatusLabel(row) }}</span>
               <span class="dashboard-primary">{{ row.text }}</span>
-              <span class="dashboard-secondary">runtime</span>
+              <span class="dashboard-secondary">{{ agentRunDuration(row) || 'runtime' }}</span>
               <span class="dashboard-mono">{{ row.threadId }}</span>
               <span class="dashboard-muted">{{ fallbackDash(row.channel) }}</span>
             </article>
@@ -1454,8 +2190,14 @@ function errorMessage(error: unknown): string {
                       <pre class="tool-pre">{{ approvalRawPayload(row.approval) }}</pre>
                     </details>
                     <div v-if="!row.approvalResult" class="approval-actions">
-                      <button type="button" data-decision="approve" @click="decideApproval(row.approval.id, true)">Approve</button>
-                      <button type="button" data-decision="deny" @click="decideApproval(row.approval.id, false)">Deny</button>
+                      <button type="button" data-decision="approve" @click="decideApproval(row.approval.id, true)">
+                        <Check :size="14" aria-hidden="true" />
+                        <span>Approve</span>
+                      </button>
+                      <button type="button" data-decision="deny" @click="decideApproval(row.approval.id, false)">
+                        <X :size="14" aria-hidden="true" />
+                        <span>Deny</span>
+                      </button>
                     </div>
                   </div>
 
@@ -1471,133 +2213,98 @@ function errorMessage(error: unknown): string {
               </details>
             </article>
           </template>
+          <div v-if="!activeAgentRows.length" class="dashboard-empty">
+            <div class="dashboard-empty-title">No activity yet</div>
+            <div class="dashboard-empty-text">Agent status and tool calls will appear here during a run.</div>
+          </div>
         </div>
       </div>
 
       <div v-else-if="activeView === 'trace'" class="trace-view">
         <div class="trace-controls">
           <label class="trace-filter">
-            <span>Search</span>
+            <span><Search :size="13" aria-hidden="true" /> Search</span>
             <input v-model="traceQuery" class="trace-input" type="search" autocomplete="off" @keydown.enter.prevent="refreshTrace" />
           </label>
           <label class="trace-filter trace-limit">
             <span>Limit</span>
             <input v-model.number="traceLimit" class="trace-input" type="number" min="1" max="1000" step="25" @keydown.enter.prevent="refreshTrace" />
           </label>
-          <button class="ghost" type="button" :disabled="traceState.loading" @click="refreshTrace">Apply</button>
+          <button class="ghost icon-label" type="button" :disabled="traceState.loading" @click="refreshTrace">
+            <RefreshCw :size="15" aria-hidden="true" />
+            <span>Apply</span>
+          </button>
         </div>
 
         <div v-if="traceState.tracePath" class="trace-path">{{ traceState.tracePath }}</div>
 
-        <div class="trace-summary">
-          <div class="metric">
-            <div class="metric-label">events</div>
-            <div class="metric-value">{{ traceMetric(traceState.stats.total_events) }}</div>
-          </div>
-          <div class="metric">
-            <div class="metric-label">groups</div>
-            <div class="metric-value">{{ traceMetric(traceState.stats.group_count) }}</div>
-          </div>
-          <div class="metric">
-            <div class="metric-label">approvals</div>
-            <div class="metric-value">{{ traceMetric(traceState.stats.approvals) }}</div>
-          </div>
-          <div class="metric">
-            <div class="metric-label">denied</div>
-            <div class="metric-value">{{ traceMetric(traceState.stats.rejected_approvals) }}</div>
-          </div>
-          <div class="metric">
-            <div class="metric-label">dropped</div>
-            <div class="metric-value">{{ traceRouteCount('dropped') + traceRouteCount('rejected') }}</div>
-          </div>
+        <div class="trace-glance" aria-label="Trace summary">
+          <span class="trace-glance-chip" :data-tone="traceIssueCount ? 'issue' : 'ok'">
+            <span>{{ traceIssueCount }}</span>
+            <span>issues</span>
+          </span>
+          <span class="trace-glance-chip">
+            <span>{{ traceMetric(traceState.stats.total_events) }}</span>
+            <span>events</span>
+          </span>
+          <span class="trace-glance-chip">
+            <span>{{ traceMetric(traceState.stats.approvals) }}</span>
+            <span>approvals</span>
+          </span>
+          <span class="trace-glance-chip">
+            <span>{{ traceRouteCount('dropped') + traceRouteCount('rejected') }}</span>
+            <span>blocked</span>
+          </span>
+          <span class="trace-glance-note">{{ traceMetric(traceState.stats.group_count) }} relation groups</span>
         </div>
 
         <div v-if="traceState.error" class="trace-empty trace-error">{{ traceState.error }}</div>
         <div v-else-if="!traceState.available" class="trace-empty">Trace is not configured for this bridge.</div>
-        <div v-else-if="!traceState.groups.length" class="trace-empty">No trace events yet.</div>
-        <div v-else class="trace-groups">
-          <section v-for="group in traceState.groups" :key="group.id" class="trace-group" :data-kind="group.kind">
-            <details open class="trace-group-details">
-              <summary class="trace-group-summary">
-                <span class="trace-group-kind">{{ group.kind }}</span>
-                <span class="trace-group-title">{{ group.title }}</span>
-                <span class="trace-group-meta">{{ group.summary.event_count }} events / {{ group.summary.requests }} req / {{ group.summary.responses }} res</span>
-                <span class="trace-group-meta">{{ traceGroupRange(group) }}</span>
-                <span class="trace-group-meta trace-group-endpoints">{{ traceEndpointSummary(group) }}</span>
-              </summary>
-
-              <div v-if="traceGroupRelations(group).length" class="trace-relation-strip">
+        <div v-else-if="!traceState.events.length" class="trace-empty">No trace events yet.</div>
+        <div v-else class="trace-event-stream" aria-label="Trace event stream">
+          <article
+            v-for="event in traceState.events"
+            :key="event.id"
+            class="trace-event"
+            :data-route="traceRoute(event)"
+            :data-direction="traceDirection(event)"
+            :data-tone="traceTone(event)"
+            :style="traceDepthStyle(event)"
+          >
+            <div class="trace-event-rail" aria-hidden="true">
+              <span class="trace-lane"><span class="trace-node"></span></span>
+            </div>
+            <div class="trace-event-body">
+              <div class="trace-event-main">
+                <span class="trace-time">{{ formatTraceTime(event.timestamp) }}</span>
+                <span class="trace-route-badge" :data-route="traceRoute(event)">{{ traceRoute(event) }}</span>
+                <span class="trace-direction">{{ traceDirection(event) }}</span>
+                <span class="trace-primary">{{ tracePrimaryLine(event) }}</span>
+              </div>
+              <div class="trace-event-detail">
+                <span class="trace-detail-title">{{ event.label }}</span>
+                <span v-if="event.detail" class="trace-detail-text">{{ event.detail }}</span>
+              </div>
+              <div class="trace-event-meta">
+                <button class="trace-relation-chip compact" type="button" @click="traceQuery = traceGroupLabel(event); refreshTrace()">
+                  group {{ traceGroupLabel(event) }}
+                </button>
+                <span v-if="traceParent(event)" class="trace-chip">parent {{ traceParent(event) }}</span>
                 <button
-                  v-for="relation in traceGroupRelations(group)"
+                  v-for="relation in traceRelations(event)"
                   :key="relation.kind + ':' + relation.value"
-                  class="trace-relation-chip"
+                  class="trace-relation-chip compact"
                   type="button"
                   @click="filterTraceRelation(relation)"
                 >
                   {{ relation.label }}
                 </button>
+                <span v-for="chip in traceChips(event)" :key="chip" class="trace-chip">{{ chip }}</span>
               </div>
-
-              <div class="trace-table">
-                <div class="trace-table-head">
-                  <span>Time</span>
-                  <span>Relation</span>
-                  <span>Flow</span>
-                  <span>Operation</span>
-                  <span>Details</span>
-                </div>
-                <article
-                  v-for="event in group.events"
-                  :key="event.id"
-                  class="trace-row"
-                  :data-route="traceRoute(event)"
-                  :data-direction="traceDirection(event)"
-                  :style="traceDepthStyle(event)"
-                >
-                  <span class="trace-time">
-                    <span class="trace-lane" aria-hidden="true"><span class="trace-node"></span></span>
-                    <span>{{ formatTraceTime(event.timestamp) }}</span>
-                  </span>
-                  <span class="trace-route">
-                    <span>{{ traceDirection(event) }}</span>
-                    <span v-if="traceParent(event)" class="trace-parent">parent {{ traceParent(event) }}</span>
-                    <span class="trace-route-result">{{ traceRoute(event) }}</span>
-                  </span>
-                  <span class="trace-flow">{{ traceFlow(event) }}</span>
-                  <span class="trace-label">{{ traceOperation(event) }}</span>
-                  <span class="trace-detail">
-                    <span class="trace-detail-title">{{ event.label }}</span>
-                    <span v-if="event.detail" class="trace-detail-text">{{ event.detail }}</span>
-                    <span v-if="traceRelations(event).length" class="trace-relations">
-                      <button
-                        v-for="relation in traceRelations(event)"
-                        :key="relation.kind + ':' + relation.value"
-                        class="trace-relation-chip compact"
-                        type="button"
-                        @click="filterTraceRelation(relation)"
-                      >
-                        {{ relation.label }}
-                      </button>
-                    </span>
-                    <span v-if="traceChips(event).length" class="trace-chips">
-                      <span v-for="chip in traceChips(event)" :key="chip" class="trace-chip">{{ chip }}</span>
-                    </span>
-                  </span>
-                </article>
-              </div>
-            </details>
-          </section>
+            </div>
+          </article>
         </div>
       </div>
-
-      <form v-if="activeView === 'chat'" class="composer" @submit.prevent="submitMessage">
-        <div v-if="activeThreadId" class="thread-context">
-          <span class="thread-label">{{ activeThreadLabel }}</span>
-          <button class="ghost" type="button" @click="clearActiveThread()">Clear</button>
-        </div>
-        <textarea ref="messageInput" v-model="messageText" rows="2" autocomplete="off" />
-        <button type="submit">Send</button>
-      </form>
     </section>
   </main>
 </template>

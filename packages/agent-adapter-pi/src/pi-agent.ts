@@ -55,6 +55,8 @@ export interface PiRuntimeOptions<TApi extends Api = Api> {
   build_context?: (input: SlockAgentRun, context: AgentRuntimeContext) => Context | Promise<Context>;
 }
 
+const MEMORY_CONTEXT_TIMEOUT_CAP_MS = 10000;
+
 export interface PiAgentOptions<TApi extends Api = Api> extends PiRuntimeOptions<TApi> {
   uri?: EndpointUri;
 }
@@ -69,7 +71,21 @@ export function createPiAgent<TApi extends Api = Api>(options: PiAgentOptions<TA
 export function createPiRuntime<TApi extends Api = Api>(options: PiRuntimeOptions<TApi>): AgentRuntime {
   return {
     async *run(input: SlockAgentRun, context: AgentRuntimeContext): AsyncIterable<AgentRuntimeEvent> {
-      const piContext = await buildContext(input, context, options);
+      const contextEvents = buildContext(input, context, options);
+      let piContext: Context | undefined;
+      while (true) {
+        const next = await contextEvents.next();
+        if (next.done) {
+          piContext = next.value;
+          break;
+        }
+        yield next.value;
+      }
+
+      if (!piContext) {
+        throw new Error("pi-ai context builder completed without a context");
+      }
+
       const maxToolTurns = options.max_tool_turns;
       let toolTurns = 0;
       let lastStreamedText = "";
@@ -80,8 +96,10 @@ export function createPiRuntime<TApi extends Api = Api>(options: PiRuntimeOption
           return;
         }
 
+        yield phaseStatusEvent(input.message_id, "model", "running", "Starting model stream.");
         const piStream = stream(resolveModel(options), piContext, resolveStreamOptions(options, context));
         let streamedText = "";
+        let reportedFirstModelDelta = false;
 
         for await (const event of piStream) {
           if (context.signal?.aborted) {
@@ -90,6 +108,10 @@ export function createPiRuntime<TApi extends Api = Api>(options: PiRuntimeOption
           }
 
           if (event.type === "text_delta") {
+            if (!reportedFirstModelDelta && event.delta.length > 0) {
+              reportedFirstModelDelta = true;
+              yield phaseStatusEvent(input.message_id, "model", "streaming", "Model stream is responding.");
+            }
             streamedText += event.delta;
             yield { type: "message_delta", thread_id: input.message_id, text: event.delta };
             continue;
@@ -101,6 +123,7 @@ export function createPiRuntime<TApi extends Api = Api>(options: PiRuntimeOption
               return;
             }
             const message = event.error.errorMessage ?? "pi-ai stream failed";
+            yield phaseStatusEvent(input.message_id, "model", "errored", message);
             throw new Error(message);
           }
         }
@@ -111,6 +134,7 @@ export function createPiRuntime<TApi extends Api = Api>(options: PiRuntimeOption
         }
 
         const message = await piStream.result();
+        yield phaseStatusEvent(input.message_id, "model", "completed", "Model stream completed.");
         lastStreamedText = streamedText || lastStreamedText;
         piContext.messages.push(message);
 
@@ -180,6 +204,59 @@ function toolStatusEvent(
       ...(isError ? { is_error: true } : {}),
     },
   };
+}
+
+function phaseStatusEvent(
+  threadId: string,
+  phase: string,
+  phaseState: "running" | "streaming" | "completed" | "errored",
+  text: string,
+): AgentRuntimeEvent {
+  return {
+    type: "status",
+    thread_id: threadId,
+    text,
+    metadata: {
+      type: "agent_phase",
+      phase,
+      phase_state: phaseState,
+    },
+  };
+}
+
+function memoryContextStatusEvent(
+  threadId: string,
+  uri: EndpointUri,
+  scope: PiMemoryScope,
+  state: "running" | "completed" | "errored",
+  payload: Record<string, unknown>,
+  result?: Record<string, unknown>,
+  isError = false,
+): AgentRuntimeEvent {
+  const verb = state === "running" ? "Retrieving" : state === "completed" ? "Retrieved" : "Failed retrieving";
+  return {
+    type: "status",
+    thread_id: threadId,
+    text: `${verb} ${scope} memory`,
+    metadata: {
+      type: "tool_call",
+      tool_call_id: `memory-context:${scope}`,
+      name: "memory.retrieve",
+      arguments: {
+        target: uri,
+        action: "retrieve",
+        ...payload,
+      },
+      state,
+      ...(result ? { result } : {}),
+      ...(isError ? { is_error: true } : {}),
+    },
+  };
+}
+
+function memoryContextTimeoutMs(options: PiMemoryContextOptions): number {
+  const configured = options.timeout_ms ?? 5000;
+  return Math.min(Math.max(configured, 1), MEMORY_CONTEXT_TIMEOUT_CAP_MS);
 }
 
 function toolResultText(result: ToolResultMessage): string {
@@ -258,17 +335,32 @@ function readEnv(name: string | undefined): string | undefined {
   return name ? process.env[name] : undefined;
 }
 
-async function buildContext<TApi extends Api>(
+async function* buildContext<TApi extends Api>(
   input: SlockAgentRun,
   context: AgentRuntimeContext,
   options: PiRuntimeOptions<TApi>,
-): Promise<Context> {
+): AsyncGenerator<AgentRuntimeEvent, Context, void> {
   if (options.build_context) {
-    return await options.build_context(input, context);
+    yield phaseStatusEvent(input.message_id, "context", "running", "Building custom context.");
+    const piContext = await options.build_context(input, context);
+    yield phaseStatusEvent(input.message_id, "context", "completed", "Context ready.");
+    return piContext;
   }
 
+  yield phaseStatusEvent(input.message_id, "history", "running", "Loading channel history.");
   const messages = await buildHistoryMessages(input, context, options);
-  const memory = await retrieveMemoryContext(input, context, options.memory);
+  yield phaseStatusEvent(input.message_id, "history", "completed", `Loaded ${messages.length} context message${messages.length === 1 ? "" : "s"}.`);
+
+  const memoryEvents = retrieveMemoryContext(input, context, options.memory);
+  let memory: string[] = [];
+  while (true) {
+    const next = await memoryEvents.next();
+    if (next.done) {
+      memory = next.value;
+      break;
+    }
+    yield next.value;
+  }
 
   return {
     systemPrompt: buildSystemPrompt(options.system_prompt, options.memory, memory),
@@ -277,11 +369,11 @@ async function buildContext<TApi extends Api>(
   };
 }
 
-async function retrieveMemoryContext(
+async function* retrieveMemoryContext(
   input: SlockAgentRun,
   context: AgentRuntimeContext,
   options: PiMemoryContextOptions | undefined,
-): Promise<string[]> {
+): AsyncGenerator<AgentRuntimeEvent, string[], void> {
   if (!isMemoryContextEnabled(options)) {
     return [];
   }
@@ -290,31 +382,67 @@ async function retrieveMemoryContext(
   const scopes = options.scopes && options.scopes.length > 0 ? options.scopes : ["personal", "task"];
   const query = stripMentions(input.text) || input.text;
   const topK = options.top_k ?? 5;
-  const timeoutMs = options.timeout_ms ?? 5000;
+  const timeoutMs = memoryContextTimeoutMs(options);
   const memories: string[] = [];
+  const requests = scopes.map((scope) => ({
+    scope,
+    payload: {
+      scope,
+      query,
+      top_k: topK,
+      ...(options.workspace_id ? { workspace_id: options.workspace_id } : {}),
+    },
+  }));
 
-  for (const scope of scopes) {
-    if (context.signal?.aborted) {
-      return memories;
-    }
+  for (const request of requests) {
+    yield memoryContextStatusEvent(input.message_id, uri, request.scope, "running", request.payload);
+  }
 
+  const results = await Promise.all(requests.map(async (request) => {
+    const startedAt = Date.now();
     try {
       const result = await context.node.call<Record<string, unknown>, Record<string, unknown>>(uri, "retrieve", {
         mime_type: "application/json",
-        data: {
-          scope,
-          query,
-          top_k: topK,
-          ...(options.workspace_id ? { workspace_id: options.workspace_id } : {}),
-        },
+        data: request.payload,
       }, { ttl_ms: timeoutMs, timeout_ms: timeoutMs, signal: context.signal });
 
-      for (const memory of extractMemoryStrings(result.data)) {
-        memories.push(`${scope}: ${memory}`);
-      }
+      return {
+        ...request,
+        elapsed_ms: Date.now() - startedAt,
+        memories: extractMemoryStrings(result.data),
+      };
     } catch {
-      // Memory is helpful context, not a hard dependency for answering.
+      return {
+        ...request,
+        elapsed_ms: Date.now() - startedAt,
+        error: true,
+      };
     }
+  }));
+
+  if (context.signal?.aborted) {
+    return memories;
+  }
+
+  for (const result of results) {
+    if (result.error) {
+      yield memoryContextStatusEvent(input.message_id, uri, result.scope, "errored", result.payload, {
+        ok: false,
+        elapsed_ms: result.elapsed_ms,
+        timeout_ms: timeoutMs,
+      }, true);
+      continue;
+    }
+
+    for (const memory of result.memories) {
+      memories.push(`${result.scope}: ${memory}`);
+    }
+    yield memoryContextStatusEvent(input.message_id, uri, result.scope, "completed", result.payload, {
+      ok: true,
+      memory_count: result.memories.length,
+      elapsed_ms: result.elapsed_ms,
+      timeout_ms: timeoutMs,
+    });
   }
 
   return uniqueStrings(memories).slice(0, Math.max(topK * scopes.length, topK));
@@ -352,6 +480,10 @@ async function buildHistoryMessages<TApi extends Api>(
   context: AgentRuntimeContext,
   options: PiRuntimeOptions<TApi>,
 ): Promise<Message[]> {
+  if (input.context_text?.trim()) {
+    return [{ role: "user", content: input.context_text, timestamp: Date.now() }];
+  }
+
   const limit = options.context_history_limit ?? 20;
   if (limit <= 0) {
     return [currentUserMessage(input)];

@@ -32,16 +32,48 @@ test("Slock channel mention aliases can target multiple agents", () => {
 test("UI bridge frontend is implemented as a Vue app", () => {
   const main = readFileSync(new URL("../packages/slock-ui-bridge/web/src/main.ts", import.meta.url), "utf8");
   const app = readFileSync(new URL("../packages/slock-ui-bridge/web/src/App.vue", import.meta.url), "utf8");
+  const theme = readFileSync(new URL("../packages/slock-ui-bridge/web/src/theme/chromatix.config.ts", import.meta.url), "utf8");
+  const style = readFileSync(new URL("../packages/slock-ui-bridge/web/src/style.css", import.meta.url), "utf8");
 
-  assert.match(main, /createApp\(App\)\.mount\("#app"\)/);
+  assert.match(main, /createApp\(App\)/);
+  assert.match(main, /chromatixPlugin/);
+  assert.match(main, /app\.mount\("#app"\)/);
   assert.match(app, /<script setup lang="ts">/);
   assert.match(app, /activeView === 'trace'/);
   assert.match(app, /\/api\/trace/);
   assert.match(app, /class="trace-view"/);
+  assert.match(app, /class="trace-event-stream"/);
+  assert.doesNotMatch(app, /class="trace-group"/);
+  assert.doesNotMatch(app, /class="trace-table-head"/);
+  assert.match(style, /\.trace-event-rail::before/);
+  assert.doesNotMatch(style, /\.trace-event\s*\{[^}]*border-bottom/);
   assert.match(app, /approval-card/);
   assert.match(app, /approvalDetailChips/);
   assert.match(app, /Raw payload/);
   assert.match(app, /tool-result-summary/);
+  assert.match(app, /statusRows/);
+  assert.match(app, /class="agent-status-row"/);
+  assert.match(app, /agent_run_started/);
+  assert.match(app, /agent_run_finished/);
+  assert.match(app, /agentStatusMetaChips/);
+  assert.match(app, /agentRunDuration/);
+  assert.match(app, /currentStatusToolList/);
+  assert.match(app, /previousStatusTools/);
+  assert.match(app, /class="agent-current-tool"/);
+  assert.match(app, /toolInlineEndpointLabel/);
+  assert.match(app, /class="endpoint-kind-icon"/);
+  assert.doesNotMatch(app, /ensureToolRowInChat/);
+  assert.doesNotMatch(app, /class="tool-call activity-row"/);
+  assert.doesNotMatch(style, /max-width: 34ch/);
+  assert.match(theme, /DEFAULT_SHADE_CONFIG/);
+  for (const shade of ["50", "100", "200", "300", "400", "500", "600", "700", "800", "900", "950"]) {
+    assert.match(style, new RegExp(`--accent-${shade}:`));
+    assert.match(style, new RegExp(`--success-${shade}:`));
+    assert.match(style, new RegExp(`--warning-${shade}:`));
+    assert.match(style, new RegExp(`--danger-${shade}:`));
+    assert.match(style, new RegExp(`--info-${shade}:`));
+    assert.match(style, new RegExp(`--agent-${shade}:`));
+  }
 });
 
 test("trace viewer builds grouped content-safe timeline data", () => {

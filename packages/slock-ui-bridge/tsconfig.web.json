@@ -6,6 +6,12 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "skipLibCheck": true,
     "moduleResolution": "Bundler",
+    "paths": {
+      "@/*": ["./web/src/*"],
+      "@kairos-ipc/chromatix": ["../chromatix/src/index.ts"],
+      "@kairos-ipc/chromatix-vue": ["../chromatix-vue/src/index.ts"],
+      "@kairos-ipc/unocss-preset-chromatix": ["../chromatix-unocss/src/index.ts"]
+    },
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,

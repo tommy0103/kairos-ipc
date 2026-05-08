@@ -5,6 +5,7 @@ export const SLOCK_CHANNEL_EVENT_MIME = "application/vnd.slock.channel-event+jso
 export const SLOCK_AGENT_RUN_MIME = "application/vnd.slock.agent-run+json";
 export const SLOCK_MESSAGE_DELTA_MIME = "application/vnd.slock.message-delta+json";
 export const SLOCK_AGENT_RESULT_MIME = "application/vnd.slock.agent-result+json";
+export const SLOCK_PROJECTION_MIME = "application/vnd.slock.projection+json";
 export const SLOCK_APPROVAL_REQUEST_MIME = "application/vnd.slock.approval-request+json";
 export const SLOCK_APPROVAL_RESULT_MIME = "application/vnd.slock.approval-result+json";
 export const SLOCK_SHELL_EXEC_MIME = "application/vnd.slock.shell-exec+json";
@@ -44,6 +45,16 @@ export interface SlockCancelAgentRunResult {
   reason?: string;
 }
 
+export interface SlockProjectionInput {
+  sender: EndpointUri;
+  text: string;
+  thread_id?: string | null;
+  reply_to_id?: string | null;
+  kind?: "agent" | "system";
+  source_event_id?: string;
+  title?: string;
+}
+
 export interface SlockMessage {
   id: string;
   channel: EndpointUri;
@@ -72,6 +83,8 @@ export interface SlockChannelEvent {
     | "message_created"
     | "message_updated"
     | "message_delta"
+    | "agent_run_started"
+    | "agent_run_finished"
     | "typing_started"
     | "approval_requested"
     | "approval_resolved"
@@ -87,6 +100,7 @@ export interface SlockChannelEvent {
     kind?: "text" | "status";
     metadata?: Record<string, unknown>;
   };
+  run?: SlockAgentRunEvent;
   error?: {
     code: string;
     message: string;
@@ -110,12 +124,36 @@ export interface SlockChannelEvent {
   result?: SlockApprovalResult;
 }
 
+export interface SlockAgentRunEvent {
+  run_id: string;
+  message_id: string;
+  thread_id?: string | null;
+  agent: EndpointUri;
+  state: "started" | "completed" | "errored" | "cancelled";
+  started_at?: string;
+  finished_at?: string;
+  final_message_id?: string;
+  reason?: string;
+  error?: {
+    code: string;
+    message: string;
+  };
+}
+
 export interface SlockAgentRun {
   channel: EndpointUri;
   message_id: string;
+  run_id?: string;
   thread_id?: string | null;
   text: string;
   sender: EndpointUri;
+  session_id?: string;
+  delegation_id?: string;
+  purpose?: "delegation" | "synthesis" | "review" | "handoff";
+  context_text?: string;
+  source_refs?: unknown[];
+  artifact_refs?: string[];
+  barrier_refs?: string[];
 }
 
 export interface SlockAgentResult {

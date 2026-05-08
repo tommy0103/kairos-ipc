@@ -41,6 +41,7 @@ test("Slock web daemon loads JSON config and starts mock agent mode", async () =
     "app://slock/channel/general",
     "app://slock/dm/local-mock",
   ]);
+  assert.deepEqual(config.channels?.[1]?.default_mentions, ["agent://local/mock"]);
   assert.equal(config.agent?.mode, "mock");
   assert.equal(config.plugins?.memory?.enabled, true);
   assert.equal(config.plugins?.memory?.uri, "plugin://memory/reme");
@@ -49,6 +50,8 @@ test("Slock web daemon loads JSON config and starts mock agent mode", async () =
   assert.equal(config.plugins?.browser?.enabled, true);
   assert.equal(config.plugins?.browser?.uri, "plugin://local/browser");
   assert.equal(config.plugins?.browser?.allowed_origins, undefined);
+  assert.equal(config.collaboration?.enabled, true);
+  assert.equal(config.collaboration?.session_manager_uri, "app://kairos/session-manager");
   assert.deepEqual(config.channel?.mention_aliases, {
     mock: "agent://local/mock",
     agent: "agent://local/mock",
@@ -58,6 +61,7 @@ test("Slock web daemon loads JSON config and starts mock agent mode", async () =
   try {
     assert.equal(daemon.url, undefined);
     assert.equal(daemon.registry_uri, "slock://registry");
+    assert.equal(daemon.session_manager_uri, "app://kairos/session-manager");
     assert.equal(daemon.agent_uri, "agent://local/mock");
     assert.deepEqual(daemon.channel_uris, ["app://slock/channel/general", "app://slock/dm/local-mock"]);
     assert.equal(daemon.config.plugins?.calculator?.enabled, true);
@@ -66,6 +70,42 @@ test("Slock web daemon loads JSON config and starts mock agent mode", async () =
   } finally {
     await daemon.close();
   }
+});
+
+test("Slock web daemon infers DM default mentions from DM URI aliases", () => {
+  const root = mkdtempSync(join("/private/tmp", "kairos-ipc-daemon-dm-alias-"));
+  const configPath = join(root, "slock-web.json");
+  writeFileSync(configPath, JSON.stringify({
+    channels: [
+      { uri: "app://slock/dm/local-pi", kind: "dm" },
+    ],
+  }), "utf8");
+  const config = loadSlockWebDaemonConfig({
+    argv: ["--config", configPath],
+    env: {
+      KAIROS_IPC_PI_API_KEY: "test-key",
+      KAIROS_IPC_PI_PROVIDER: "openai",
+      KAIROS_IPC_PI_MODEL: "gpt-4o-mini",
+    },
+    cwd: root,
+  });
+
+  assert.equal(config.channels?.[0]?.label, "local-pi");
+  assert.deepEqual(config.channels?.[0]?.default_mentions, ["agent://local/pi-assistant"]);
+});
+
+test("Slock web daemon loads pi API override from CLI", () => {
+  const root = mkdtempSync(join("/private/tmp", "kairos-ipc-daemon-api-"));
+  const config = loadSlockWebDaemonConfig({
+    argv: ["--provider", "openai", "--model", "gpt-5.5", "--api", "openai-completions", "--base-url", "https://gateway.example.test/v1"],
+    env: {},
+    cwd: root,
+  });
+
+  assert.equal(config.agent?.provider, "openai");
+  assert.equal(config.agent?.model, "gpt-5.5");
+  assert.equal(config.agent?.api, "openai-completions");
+  assert.equal(config.agent?.base_url, "https://gateway.example.test/v1");
 });
 
 test("Slock web daemon defaults general to all built-in agents online", async () => {

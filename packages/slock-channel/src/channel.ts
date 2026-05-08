@@ -7,8 +7,10 @@ import {
   SLOCK_CHANNEL_EVENT_MIME,
   SLOCK_MESSAGE_DELTA_MIME,
   SLOCK_MESSAGE_MIME,
+  SLOCK_PROJECTION_MIME,
   type SlockAgentResult,
   type SlockAgentRun,
+  type SlockAgentRunEvent,
   type SlockApprovalEvent,
   type SlockApprovalResult,
   type SlockCancelAgentRunRequest,
@@ -19,6 +21,7 @@ import {
   type SlockMessage,
   type SlockMessageInput,
   type SlockMessageUpdateInput,
+  type SlockProjectionInput,
   type SlockSubscriptionClosedInput,
   type SlockTypingStartedInput,
 } from "./types.ts";
@@ -26,8 +29,10 @@ import {
 export interface SlockChannelOptions {
   uri: EndpointUri;
   mention_aliases?: MentionAliases;
+  default_mentions?: EndpointUri[];
   history_limit?: number;
   default_agent_ttl_ms?: number;
+  session_manager_uri?: EndpointUri;
 }
 
 export interface SlockChannelEndpoint {
@@ -41,8 +46,9 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
   const messages: SlockMessage[] = [];
   const subscribers = new Set<EndpointUri>();
   const subscriptionCorrelations = new Map<EndpointUri, string | undefined>();
-  const activeRuns = new Map<string, Map<EndpointUri, { correlation_id: string; cancel_requested?: boolean; reason?: string }>>();
+  const activeRuns = new Map<string, Map<EndpointUri, { correlation_id: string; started_at: string; cancel_requested?: boolean; reason?: string }>>();
   const mentionAliases = options.mention_aliases ?? {};
+  const defaultMentions = uniqueAgentUris(options.default_mentions ?? []);
   const historyLimit = options.history_limit ?? 100;
   const agentTtlMs = options.default_agent_ttl_ms ?? 600000;
   let nextMessageId = 1;
@@ -85,23 +91,58 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
     async (payload, context) => {
       const input = payload.data;
       const threadId = input.thread_id ?? null;
+      const kind: SlockMessage["kind"] = context.envelope.header.source.startsWith("agent://") ? "agent" : "human";
       const inferredMentions = inferMentions(input.text, input.mentions, mentionAliases);
-      const mentions = inferredMentions.length > 0 ? inferredMentions : inferThreadMentions(threadId);
+      const threadMentions = inferredMentions.length > 0 ? [] : inferThreadMentions(threadId);
+      const mentions = inferredMentions.length > 0
+        ? inferredMentions
+        : threadMentions.length > 0
+          ? threadMentions
+          : kind === "human"
+            ? defaultMentions
+            : [];
       const message = appendMessage({
         sender: context.envelope.header.source,
         text: input.text,
         mentions,
         thread_id: threadId,
         reply_to_id: input.reply_to_id ?? threadId,
-        kind: context.envelope.header.source.startsWith("agent://") ? "agent" : "human",
+        kind,
       });
 
       broadcast("message_created", { message });
 
-      for (const agentUri of message.mentions) {
-        void runMentionedAgent(agentUri, message);
+      if (options.session_manager_uri && kind === "human") {
+        void routeMessageToSessionManager(message);
+      } else {
+        for (const agentUri of message.mentions) {
+          void runMentionedAgent(agentUri, message);
+        }
       }
 
+      return { mime_type: SLOCK_MESSAGE_MIME, data: message };
+    },
+  );
+
+  node.action<SlockProjectionInput, SlockMessage>(
+    "publish_projection",
+    {
+      description: "Append a session-owned projection into the channel without mention routing.",
+      accepts: SLOCK_PROJECTION_MIME,
+      returns: SLOCK_MESSAGE_MIME,
+    },
+    async (payload) => {
+      const projection = readProjectionInput(payload.data);
+      const message = appendMessage({
+        sender: projection.sender,
+        text: projection.text,
+        mentions: [],
+        thread_id: projection.thread_id ?? null,
+        reply_to_id: projection.reply_to_id ?? projection.thread_id ?? null,
+        kind: projection.kind ?? (projection.sender.startsWith("agent://") ? "agent" : "system"),
+      });
+
+      broadcast("message_created", { message });
       return { mime_type: SLOCK_MESSAGE_MIME, data: message };
     },
   );
@@ -200,6 +241,29 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
     },
     async (payload) => {
       const request = readCancelAgentRunRequest(payload.data);
+      if (options.session_manager_uri) {
+        try {
+          const result = await node.call<SlockCancelAgentRunRequest, SlockCancelAgentRunResult>(
+            options.session_manager_uri,
+            "cancel_agent_run",
+            { mime_type: "application/json", data: request },
+            { ttl_ms: 5000, timeout_ms: 5000 },
+          );
+          return { mime_type: "application/json", data: result.data };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          broadcast("agent_error", { error: { code: "SESSION_CANCEL_FAILED", message, source: options.session_manager_uri } });
+          return {
+            mime_type: "application/json",
+            data: {
+              cancelled: false,
+              message_id: request.message_id,
+              reason: message,
+            },
+          };
+        }
+      }
+
       const runs = activeRuns.get(request.message_id);
       if (!runs || runs.size === 0) {
         return {
@@ -240,6 +304,62 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
           reason,
         },
       };
+    },
+  );
+
+  node.action<SlockAgentRunEvent>(
+    "publish_agent_run_started",
+    {
+      description: "Broadcast that a session-owned agent run started.",
+      accepts: "application/json",
+      returns: "application/json",
+    },
+    async (payload) => {
+      const run = readAgentRunEvent(payload.data, "started");
+      broadcast("agent_run_started", { run });
+      return { mime_type: "application/json", data: { published: true, run_id: run.run_id } };
+    },
+  );
+
+  node.action<SlockAgentRunEvent>(
+    "publish_agent_run_finished",
+    {
+      description: "Broadcast that a session-owned agent run finished.",
+      accepts: "application/json",
+      returns: "application/json",
+    },
+    async (payload) => {
+      const run = readAgentRunEvent(payload.data);
+      broadcast("agent_run_finished", { run });
+      return { mime_type: "application/json", data: { published: true, run_id: run.run_id } };
+    },
+  );
+
+  node.action<{ message_id: string; agent: EndpointUri; reason?: string }>(
+    "publish_agent_cancelled",
+    {
+      description: "Broadcast that a session-owned agent run was cancelled.",
+      accepts: "application/json",
+      returns: "application/json",
+    },
+    async (payload) => {
+      const cancelled = readAgentCancelled(payload.data);
+      broadcast("agent_cancelled", { cancelled });
+      return { mime_type: "application/json", data: { published: true, message_id: cancelled.message_id } };
+    },
+  );
+
+  node.action<{ code?: string; message: string; source: EndpointUri }>(
+    "publish_agent_error",
+    {
+      description: "Broadcast a session-owned agent error.",
+      accepts: "application/json",
+      returns: "application/json",
+    },
+    async (payload) => {
+      const error = readAgentError(payload.data);
+      broadcast("agent_error", { error });
+      return { mime_type: "application/json", data: { published: true, source: error.source } };
     },
   );
 
@@ -347,9 +467,21 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
 
   async function runMentionedAgent(agentUri: EndpointUri, message: SlockMessage): Promise<void> {
     const correlationId = createCorrelationId("conv");
-    const runs = activeRuns.get(message.id) ?? new Map<EndpointUri, { correlation_id: string; cancel_requested?: boolean; reason?: string }>();
+    const startedAt = new Date().toISOString();
+    const runs = activeRuns.get(message.id) ?? new Map<EndpointUri, { correlation_id: string; started_at: string; cancel_requested?: boolean; reason?: string }>();
     activeRuns.set(message.id, runs);
-    runs.set(agentUri, { correlation_id: correlationId });
+    runs.set(agentUri, { correlation_id: correlationId, started_at: startedAt });
+    broadcast("agent_run_started", {
+      run: {
+        run_id: correlationId,
+        message_id: message.id,
+        thread_id: message.thread_id,
+        agent: agentUri,
+        state: "started",
+        started_at: startedAt,
+      },
+    });
+
     try {
       const result = await node.call<SlockAgentRun, SlockAgentResult>(
         agentUri,
@@ -359,6 +491,7 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
           data: {
             channel: options.uri,
             message_id: message.id,
+            run_id: correlationId,
             thread_id: message.thread_id,
             text: stripMentions(message.text),
             sender: message.sender,
@@ -370,15 +503,28 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
       const final = result.data;
       const activeRun = activeRuns.get(message.id)?.get(agentUri);
       if (final.cancelled || activeRun?.cancel_requested) {
+        const reason = final.reason ?? activeRun?.reason;
         if (!activeRun?.cancel_requested) {
           broadcast("agent_cancelled", {
             cancelled: {
               message_id: message.id,
               agent: agentUri,
-              reason: final.reason,
+              reason,
             },
           });
         }
+        broadcast("agent_run_finished", {
+          run: {
+            run_id: correlationId,
+            message_id: message.id,
+            thread_id: message.thread_id,
+            agent: agentUri,
+            state: "cancelled",
+            started_at: startedAt,
+            finished_at: new Date().toISOString(),
+            reason,
+          },
+        });
         return;
       }
 
@@ -391,16 +537,58 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
       });
       final.final_message_id = finalMessage.id;
       broadcast("message_created", { message: finalMessage });
+      broadcast("agent_run_finished", {
+        run: {
+          run_id: correlationId,
+          message_id: message.id,
+          thread_id: message.thread_id,
+          agent: agentUri,
+          state: "completed",
+          started_at: startedAt,
+          finished_at: new Date().toISOString(),
+          final_message_id: finalMessage.id,
+        },
+      });
     } catch (error) {
       const code = error instanceof IpcCallError ? error.code : "AGENT_RUN_FAILED";
       const messageText = error instanceof Error ? error.message : "agent run failed";
       broadcast("agent_error", { error: { code, message: messageText, source: agentUri } });
+      broadcast("agent_run_finished", {
+        run: {
+          run_id: correlationId,
+          message_id: message.id,
+          thread_id: message.thread_id,
+          agent: agentUri,
+          state: "errored",
+          started_at: startedAt,
+          finished_at: new Date().toISOString(),
+          error: { code, message: messageText },
+        },
+      });
     } finally {
       const runs = activeRuns.get(message.id);
       runs?.delete(agentUri);
       if (runs?.size === 0) {
         activeRuns.delete(message.id);
       }
+    }
+  }
+
+  async function routeMessageToSessionManager(message: SlockMessage): Promise<void> {
+    if (!options.session_manager_uri) return;
+    try {
+      await node.call(
+        options.session_manager_uri,
+        "create_or_attach_session",
+        {
+          mime_type: "application/json",
+          data: { message, mentions: message.mentions },
+        },
+        { ttl_ms: 5000, timeout_ms: 5000 },
+      );
+    } catch (error) {
+      const messageText = error instanceof Error ? error.message : String(error);
+      broadcast("agent_error", { error: { code: "SESSION_ROUTE_FAILED", message: messageText, source: options.session_manager_uri } });
     }
   }
 
@@ -426,6 +614,70 @@ function readCancelAgentRunRequest(value: unknown): SlockCancelAgentRunRequest {
   return {
     message_id: value.message_id,
     reason: typeof value.reason === "string" ? value.reason : undefined,
+  };
+}
+
+function readProjectionInput(value: unknown): SlockProjectionInput {
+  if (!isRecord(value) || typeof value.sender !== "string" || typeof value.text !== "string") {
+    throw new Error("publish_projection requires sender and text");
+  }
+  return {
+    sender: value.sender,
+    text: value.text,
+    thread_id: typeof value.thread_id === "string" ? value.thread_id : value.thread_id === null ? null : undefined,
+    reply_to_id: typeof value.reply_to_id === "string" ? value.reply_to_id : value.reply_to_id === null ? null : undefined,
+    kind: value.kind === "agent" || value.kind === "system" ? value.kind : undefined,
+    source_event_id: typeof value.source_event_id === "string" ? value.source_event_id : undefined,
+    title: typeof value.title === "string" ? value.title : undefined,
+  };
+}
+
+function readAgentRunEvent(value: unknown, expectedState?: SlockAgentRunEvent["state"]): SlockAgentRunEvent {
+  if (!isRecord(value) || typeof value.run_id !== "string" || typeof value.message_id !== "string" || typeof value.agent !== "string") {
+    throw new Error("agent run event requires run_id, message_id, and agent");
+  }
+  const state = typeof value.state === "string" && isAgentRunState(value.state) ? value.state : expectedState;
+  if (!state) {
+    throw new Error("agent run event requires a valid state");
+  }
+  if (expectedState && state !== expectedState) {
+    throw new Error(`agent run event state must be ${expectedState}`);
+  }
+  return {
+    run_id: value.run_id,
+    message_id: value.message_id,
+    thread_id: typeof value.thread_id === "string" ? value.thread_id : value.thread_id === null ? null : undefined,
+    agent: value.agent,
+    state,
+    started_at: typeof value.started_at === "string" ? value.started_at : undefined,
+    finished_at: typeof value.finished_at === "string" ? value.finished_at : undefined,
+    final_message_id: typeof value.final_message_id === "string" ? value.final_message_id : undefined,
+    reason: typeof value.reason === "string" ? value.reason : undefined,
+    error: isRecord(value.error) && typeof value.error.code === "string" && typeof value.error.message === "string"
+      ? { code: value.error.code, message: value.error.message }
+      : undefined,
+  };
+}
+
+function readAgentCancelled(value: unknown): { message_id: string; agent: EndpointUri; reason?: string } {
+  if (!isRecord(value) || typeof value.message_id !== "string" || typeof value.agent !== "string") {
+    throw new Error("publish_agent_cancelled requires message_id and agent");
+  }
+  return {
+    message_id: value.message_id,
+    agent: value.agent,
+    reason: typeof value.reason === "string" ? value.reason : undefined,
+  };
+}
+
+function readAgentError(value: unknown): { code: string; message: string; source: EndpointUri } {
+  if (!isRecord(value) || typeof value.message !== "string" || typeof value.source !== "string") {
+    throw new Error("publish_agent_error requires message and source");
+  }
+  return {
+    code: typeof value.code === "string" ? value.code : "AGENT_RUN_FAILED",
+    message: value.message,
+    source: value.source,
   };
 }
 
@@ -499,6 +751,14 @@ function readLimit(value: unknown, fallback: number): number {
 
 function stripMentions(text: string): string {
   return text.replace(/(^|\s)@\S+/g, " ").trim();
+}
+
+function uniqueAgentUris(uris: EndpointUri[]): EndpointUri[] {
+  return [...new Set(uris.filter((uri) => uri.startsWith("agent://")))];
+}
+
+function isAgentRunState(value: string): value is SlockAgentRunEvent["state"] {
+  return value === "started" || value === "completed" || value === "errored" || value === "cancelled";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

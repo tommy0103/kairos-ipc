@@ -8,7 +8,7 @@ import type { Connection } from "../packages/kernel/src/registry.ts";
 import { EndpointRegistry } from "../packages/kernel/src/registry.ts";
 import { Router } from "../packages/kernel/src/router.ts";
 import { TraceWriter } from "../packages/kernel/src/trace.ts";
-import { SLOCK_APPROVAL_REQUEST_MIME, SLOCK_MESSAGE_MIME } from "../packages/slock-channel/src/index.ts";
+import { SLOCK_APPROVAL_REQUEST_MIME, SLOCK_CHANNEL_EVENT_MIME, SLOCK_MESSAGE_DELTA_MIME, SLOCK_MESSAGE_MIME } from "../packages/slock-channel/src/index.ts";
 
 test("routes CALL and RESOLVE between registered endpoints", () => {
   const context = createContext();
@@ -65,6 +65,10 @@ test("returns REJECT when target is not registered", () => {
 
   const trace = readFileSync(context.tracePath, "utf8");
   assert.match(trace, /TARGET_NOT_FOUND/);
+  const traces = readTrace(context.tracePath);
+  const rejectTrace = traces.find((entry) => entry.op_code === "REJECT");
+  assert.equal(rejectTrace?.payload_kind, "ipc_reject");
+  assert.equal(rejectTrace?.reject_error_code, "TARGET_NOT_FOUND");
 });
 
 test("returns REJECT when ttl_ms has expired", () => {
@@ -213,6 +217,62 @@ test("trace extracts approval risk and proposed call metadata", () => {
   assert.equal(traces[0]?.approval_action, "exec");
   assert.equal(traces[0]?.channel, "app://slock/channel/general");
   assert.equal(traces[0]?.thread_id, "channel_msg_1");
+});
+
+test("trace extracts status delta and channel error diagnostics", () => {
+  const context = createContext();
+  const agent = new MemoryConnection("agent");
+  const channel = new MemoryConnection("channel");
+  const human = new MemoryConnection("human");
+
+  context.registry.register("agent://local/pi-assistant", agent);
+  context.registry.register("app://slock/channel/general", channel);
+  context.registry.register("human://user/local", human);
+
+  context.router.route({
+    header: {
+      msg_id: createMsgId(),
+      source: "agent://local/pi-assistant",
+      target: "app://slock/channel/general",
+      ttl_ms: 30000,
+    },
+    spec: { op_code: "EMIT", action: "message_delta" },
+    payload: {
+      mime_type: SLOCK_MESSAGE_DELTA_MIME,
+      data: {
+        thread_id: "channel_msg_1",
+        kind: "status",
+        text: "Model gateway timed out.",
+        metadata: { type: "agent_phase", phase: "model", phase_state: "errored" },
+      },
+    },
+  }, agent);
+
+  context.router.route({
+    header: {
+      msg_id: createMsgId(),
+      source: "app://slock/channel/general",
+      target: "human://user/local",
+      ttl_ms: 30000,
+    },
+    spec: { op_code: "EMIT", action: "agent_error" },
+    payload: {
+      mime_type: SLOCK_CHANNEL_EVENT_MIME,
+      data: {
+        type: "agent_error",
+        channel: "app://slock/channel/general",
+        error: { code: "ACTION_FAILED", message: "Model gateway timed out.", source: "agent://local/pi-assistant" },
+      },
+    },
+  }, channel);
+
+  const traces = readTrace(context.tracePath);
+  assert.equal(traces[0]?.status_text, "Model gateway timed out.");
+  assert.equal(traces[0]?.status_type, "agent_phase");
+  assert.equal(traces[0]?.status_phase, "model");
+  assert.equal(traces[0]?.status_phase_state, "errored");
+  assert.equal(traces[1]?.error_code, "ACTION_FAILED");
+  assert.equal(traces[1]?.error_message, "Model gateway timed out.");
 });
 
 function createContext() {

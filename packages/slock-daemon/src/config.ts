@@ -13,6 +13,7 @@ export interface SlockWebAgentConfig {
   uri?: EndpointUri;
   provider?: string;
   model?: string;
+  api?: string;
   api_key?: string;
   api_key_env?: string;
   base_url?: string;
@@ -28,6 +29,7 @@ export interface SlockWebChannelConfig {
   label?: string;
   kind?: SlockWebChannelKind;
   mention_aliases?: MentionAliases;
+  default_mentions?: EndpointUri[];
   history_limit?: number;
 }
 
@@ -51,6 +53,12 @@ export interface SlockWebDaemonConfig {
   channel?: {
     mention_aliases?: MentionAliases;
     history_limit?: number;
+  };
+  collaboration?: {
+    enabled?: boolean;
+    session_manager_uri?: EndpointUri;
+    default_agent_ttl_ms?: number;
+    coordinator_uri?: EndpointUri;
   };
   agent?: SlockWebAgentConfig;
   agents?: SlockWebAgentConfig[];
@@ -174,6 +182,12 @@ export function resolveSlockWebDaemonConfig(config: Partial<SlockWebDaemonConfig
       mention_aliases: mentionAliases,
       history_limit: config.channel?.history_limit,
     },
+    collaboration: {
+      enabled: config.collaboration?.enabled ?? true,
+      session_manager_uri: config.collaboration?.session_manager_uri ?? "app://kairos/session-manager",
+      default_agent_ttl_ms: config.collaboration?.default_agent_ttl_ms,
+      coordinator_uri: config.collaboration?.coordinator_uri,
+    },
     agent: primaryAgent,
     agents,
     plugins: {
@@ -255,6 +269,7 @@ function normalizeAgent(agent: SlockWebAgentConfig, inherited: SlockWebAgentConf
     uri: agent.uri ?? defaultAgentUri(mode),
     provider: agent.provider ?? piDefaults.provider ?? "openai",
     model: agent.model ?? piDefaults.model ?? "gpt-4o-mini",
+    api: agent.api ?? piDefaults.api,
     api_key: agent.api_key ?? piDefaults.api_key,
     api_key_env: agent.api_key_env ?? piDefaults.api_key_env,
     base_url: agent.base_url ?? piDefaults.base_url,
@@ -292,6 +307,7 @@ function configFromCliAndEnv(argv: string[], env: Record<string, string | undefi
       mode: readAgentMode(readOption(argv, "--agent")),
       provider: readOption(argv, "--provider") ?? env.KAIROS_IPC_PI_PROVIDER,
       model: readOption(argv, "--model") ?? env.KAIROS_IPC_PI_MODEL,
+      api: readOption(argv, "--api") ?? env.KAIROS_IPC_PI_API,
       api_key: readOption(argv, "--api-key") ?? env.KAIROS_IPC_PI_API_KEY,
       api_key_env: readOption(argv, "--api-key-env"),
       base_url: readOption(argv, "--base-url") ?? env.KAIROS_IPC_PI_BASE_URL ?? env.OPENAI_BASE_URL,
@@ -325,15 +341,56 @@ function normalizeChannels(
       throw new Error(`duplicate Slock channel URI: ${uri}`);
     }
     seen.add(uri);
+    const label = channel.label ?? labelFromUri(uri);
+    const kind = channel.kind ?? kindFromUri(uri);
+    const mentionAliases = channel.mention_aliases ?? config.channel?.mention_aliases ?? fallbackMentionAliases;
 
     return {
       uri,
-      label: channel.label ?? labelFromUri(uri),
-      kind: channel.kind ?? kindFromUri(uri),
-      mention_aliases: channel.mention_aliases ?? config.channel?.mention_aliases ?? fallbackMentionAliases,
+      label,
+      kind,
+      mention_aliases: mentionAliases,
+      default_mentions: channel.default_mentions ?? inferDmDefaultMentions(uri, label, kind, mentionAliases),
       history_limit: channel.history_limit ?? config.channel?.history_limit,
     };
   });
+}
+
+function inferDmDefaultMentions(
+  uri: EndpointUri,
+  label: string,
+  kind: SlockWebChannelKind,
+  aliases: MentionAliases,
+): EndpointUri[] | undefined {
+  if (kind !== "dm") {
+    return undefined;
+  }
+
+  const mentions = new Set<EndpointUri>();
+  for (const candidate of dmAliasCandidates(uri, label)) {
+    const target = aliases[candidate];
+    const uris = Array.isArray(target) ? target : target ? [target] : [];
+    for (const targetUri of uris) {
+      if (targetUri.startsWith("agent://")) {
+        mentions.add(targetUri);
+      }
+    }
+  }
+
+  return mentions.size > 0 ? [...mentions] : undefined;
+}
+
+function dmAliasCandidates(uri: EndpointUri, label: string): string[] {
+  const lastSegment = labelFromUri(uri);
+  const values = [label, lastSegment];
+  for (const value of [label, lastSegment]) {
+    values.push(...value.split(/[^a-zA-Z0-9_.-]+/));
+    values.push(...value.split(/[-_.]+/));
+  }
+
+  return [...new Set(values
+    .map((value) => value.trim().replace(/^@+/, ""))
+    .filter((value) => value.length > 0))];
 }
 
 function defaultHumanUri(config: SlockWebDaemonConfig["human"] | undefined): EndpointUri {

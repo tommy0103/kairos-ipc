@@ -134,6 +134,51 @@ test("pi-ai runtime does not cap tool turns by default", async () => {
   }
 });
 
+test("pi-ai runtime uses rendered session context before channel history", async () => {
+  const pi = registerFauxProvider({ tokensPerSecond: 1000 });
+  pi.setResponses([
+    (context) => {
+      assert.equal(context.messages.length, 1);
+      assert.equal(context.messages[0]?.role, "user");
+      assert.equal(context.messages[0]?.content, "SESSION RENDERED CONTEXT");
+      return fauxAssistantMessage(fauxText("Session context accepted."));
+    },
+  ]);
+
+  const runtime = createPiRuntime({
+    model: pi.getModel(),
+    context_history_limit: 10,
+  });
+
+  try {
+    const events = [];
+    for await (const event of runtime.run({
+      channel: "app://slock/channel/general",
+      message_id: "channel_msg_1",
+      text: "original channel text should not be the prompt",
+      sender: "human://user/local",
+      session_id: "session_1",
+      delegation_id: "delegation_1",
+      context_text: "SESSION RENDERED CONTEXT",
+    }, {
+      agent_uri: "agent://local/pi-assistant",
+      node: {
+        uri: "agent://local/pi-assistant",
+        call: async () => {
+          throw new Error("history should not be loaded when context_text is present");
+        },
+      },
+    })) {
+      events.push(event);
+    }
+
+    const finalEvent = events.find((event) => event.type === "final");
+    assert.equal(finalEvent?.result.final_text, "Session context accepted.");
+  } finally {
+    pi.unregister();
+  }
+});
+
 test("pi-ai agent adapter passes API and endpoint configuration to pi-ai", async () => {
   const pi = registerFauxProvider({ tokensPerSecond: 1000 });
   process.env.KAIROS_IPC_PI_KEY = "env-test-key";
@@ -411,6 +456,65 @@ test("pi-ai agent adapter injects retrieved long-term memory context", async () 
   }
 });
 
+test("pi-ai runtime reports automatic memory context retrieval as tool status", async () => {
+  const pi = registerFauxProvider({ tokensPerSecond: 1000 });
+  const retrieveCalls: Array<{ data: Record<string, unknown>; timeout_ms?: number; ttl_ms?: number }> = [];
+  pi.setResponses([fauxAssistantMessage(fauxText("Memory status was reported."))]);
+
+  const runtime = createPiRuntime({
+    model: pi.getModel(),
+    memory: {
+      enabled: true,
+      uri: "plugin://memory/reme",
+      workspace_id: "kairos-ipc",
+      scopes: ["personal", "task"],
+      top_k: 2,
+      timeout_ms: 120000,
+    },
+  });
+  const events = [];
+
+  try {
+    for await (const event of runtime.run({
+      channel: "app://slock/channel/general",
+      message_id: "message-1",
+      text: "@pi answer with context",
+      sender: "human://user/local",
+    }, {
+      agent_uri: "agent://local/pi-assistant",
+      node: {
+        uri: "agent://local/pi-assistant",
+        call: async (_target, action, payload, options) => {
+          if (action !== "retrieve") {
+            throw new Error("history unavailable");
+          }
+          retrieveCalls.push({
+            data: payload.data as Record<string, unknown>,
+            timeout_ms: options.timeout_ms,
+            ttl_ms: options.ttl_ms,
+          });
+          return {
+            mime_type: "application/json",
+            data: { memories: [`${String((payload.data as Record<string, unknown>).scope)} memory`] },
+          };
+        },
+      },
+    })) {
+      events.push(event);
+    }
+
+    const memoryEvents = events.filter((event) => {
+      return event.type === "status" && event.metadata?.type === "tool_call" && event.metadata.name === "memory.retrieve";
+    });
+    assert.deepEqual(memoryEvents.map((event) => event.type === "status" ? event.metadata?.state : undefined), ["running", "running", "completed", "completed"]);
+    assert.deepEqual(retrieveCalls.map((call) => call.data.scope), ["personal", "task"]);
+    assert.deepEqual(retrieveCalls.map((call) => call.timeout_ms), [10000, 10000]);
+    assert.deepEqual(retrieveCalls.map((call) => call.ttl_ms), [10000, 10000]);
+  } finally {
+    pi.unregister();
+  }
+});
+
 test("pi-ai ipc_call tool describes registry and endpoint manifest discovery", () => {
   const tools = createPiSlockTools({ ipc_call_targets: ["plugin://demo/calculator"] });
   const tool = tools.tools[0];
@@ -478,6 +582,64 @@ test("pi-ai ipc_call uses a longer internal wait for memory writes", async () =>
   const memoryCall = calls.find((call) => call.target === "plugin://memory/reme" && call.action === "summarize");
   assert.equal(memoryCall?.ttl_ms, 123000);
   assert.equal(memoryCall?.timeout_ms, 123000);
+});
+
+test("pi-ai ipc_call approval ids include channel to avoid cross-channel collisions", async () => {
+  const approvals: string[] = [];
+  const tools = createPiSlockTools({ workspace_uri: "plugin://local/workspace" });
+
+  for (const channel of ["app://slock/channel/general", "app://slock/dm/pi"]) {
+    const result = await tools.execute_tool(fauxToolCall("ipc_call", {
+      target: "plugin://local/workspace",
+      action: "write",
+      payload: { path: "note.txt", content: channel },
+    }, { id: "tool-1" }), {
+      input: {
+        channel,
+        message_id: "channel_msg_1",
+        text: "write a note",
+        sender: "human://user/local",
+      },
+      runtime: {
+        agent_uri: "agent://local/pi-assistant",
+        node: {
+          uri: "agent://local/pi-assistant",
+          call: async (target, action, payload) => {
+            if (target === "human://user/local" && action === "request_approval") {
+              const request = payload.data as { id: string; proposed_call: { target: string; action: string } };
+              approvals.push(request.id);
+              return {
+                mime_type: "application/json",
+                data: {
+                  approved: true,
+                  grant: {
+                    id: `grant-${approvals.length}`,
+                    token: `token-${approvals.length}`,
+                    source: "human://user/local",
+                    target: request.proposed_call.target,
+                    actions: [request.proposed_call.action],
+                    issued_at: new Date().toISOString(),
+                    expires_at: new Date(Date.now() + 60000).toISOString(),
+                    approval_id: request.id,
+                  },
+                },
+              };
+            }
+            if (target === "plugin://local/workspace" && action === "write") {
+              return { mime_type: "application/json", data: { ok: true } };
+            }
+            throw new Error(`unexpected call ${target} ${action}`);
+          },
+        },
+      },
+    });
+
+    assert.equal(result.isError, false);
+  }
+
+  assert.equal(new Set(approvals).size, 2);
+  assert.ok(approvals[0]?.includes("app_slock_channel_general"));
+  assert.ok(approvals[1]?.includes("app_slock_dm_pi"));
 });
 
 test("pi-ai generic ipc_call tool can discover endpoints, inspect a manifest, and call a plugin action", async () => {

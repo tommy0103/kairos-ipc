@@ -111,7 +111,9 @@ OPENAI_API_KEY=... bun run demo:slock-web -- --port 5173
 bun run demo:slock-web -- --provider openai --model gpt-4o-mini --base-url http://localhost:4000/v1
 ```
 
-The pi assistant is exposed through `@pi`, `@pi-assistant`, and `@agent`. Its Slock tools are `read`, `write`, `edit`, and `exec`: `read` calls the workspace plugin directly; `write`, `edit`, and `exec` first request human approval, then call the workspace or shell plugin through IPC.
+Use `--api openai-completions` when an OpenAI-compatible gateway exposes Chat Completions but not the Responses API selected by the model registry.
+
+The pi assistant is exposed through `@pi`, `@pi-assistant`, and `@agent`. DM channels whose label or URI segment matches an agent alias, such as `pi` or `local-pi`, implicitly route plain messages to that agent, so users do not need to mention the agent inside a PM. Its Slock tools are `read`, `write`, `edit`, and `exec`: `read` calls the workspace plugin directly; `write`, `edit`, and `exec` first request human approval, then call the workspace or shell plugin through IPC.
 
 By default, the pi assistant builds each run from recent Slock channel history, capped by `context_history_limit` and truncated at the current message id. Human messages are replayed as pi-ai user messages with mentions stripped, and prior Slock agent messages are replayed as pi-ai assistant messages. Set `context_history_limit: 0` to fall back to single-message runs.
 

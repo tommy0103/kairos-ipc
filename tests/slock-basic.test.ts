@@ -129,6 +129,54 @@ test("Slock basic mention flow stays on IPC endpoints", async () => {
   await calculator.node.close();
 });
 
+test("Slock DM default mentions route messages to the direct agent", async () => {
+  const context = createContext();
+  const human = createNode("human://user/local");
+  const dm = createSlockChannel({
+    uri: "app://slock/dm/local-mock",
+    default_mentions: ["agent://local/mock"],
+  });
+  const agent = createMockAgent({ uri: "agent://local/mock" });
+  const calculator = createCalculatorPlugin({ uri: "plugin://demo/calculator" });
+  const events: SlockChannelEvent[] = [];
+
+  human.onEmit("*", (payload) => {
+    if (payload.mime_type === SLOCK_CHANNEL_EVENT_MIME) {
+      events.push(payload.data as SlockChannelEvent);
+    }
+  });
+
+  try {
+    await human.connect(context.createTransport("human"));
+    await dm.node.connect(context.createTransport("dm"));
+    await agent.node.connect(context.createTransport("agent"));
+    await calculator.node.connect(context.createTransport("calculator"));
+
+    await human.call("app://slock/dm/local-mock", "subscribe", {
+      mime_type: "application/json",
+      data: {},
+    });
+
+    const posted = await human.call("app://slock/dm/local-mock", "post_message", {
+      mime_type: SLOCK_MESSAGE_MIME,
+      data: { text: "hello dm", thread_id: null },
+    });
+
+    assert.deepEqual((posted.data as { mentions: string[] }).mentions, ["agent://local/mock"]);
+    await waitFor(() => events.some((event) => event.type === "message_created" && event.message?.kind === "agent"));
+
+    const finalEvent = events.find((event) => event.type === "message_created" && event.message?.kind === "agent");
+    assert.equal(finalEvent?.channel, "app://slock/dm/local-mock");
+    assert.equal(finalEvent?.message?.sender, "agent://local/mock");
+    assert.ok(finalEvent?.message?.text.includes("Mock agent handled \"hello dm\""));
+  } finally {
+    await human.close().catch(() => undefined);
+    await dm.node.close().catch(() => undefined);
+    await agent.node.close().catch(() => undefined);
+    await calculator.node.close().catch(() => undefined);
+  }
+});
+
 test("Slock thread replies route to existing agent participants", async () => {
   const context = createContext();
   const human = createNode("human://user/local");

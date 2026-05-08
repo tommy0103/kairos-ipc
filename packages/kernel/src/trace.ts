@@ -74,6 +74,10 @@ function deriveEnvelopeMetadata(envelope: Envelope): Record<string, unknown> {
   const data = envelope.payload.data;
   const metadata: Record<string, unknown> = {};
 
+  if (envelope.spec.op_code === "REJECT") {
+    Object.assign(metadata, deriveRejectMetadata(data));
+  }
+
   if (envelope.payload.mime_type === "application/vnd.slock.message+json") {
     Object.assign(metadata, deriveMessageMetadata(data, envelope));
   }
@@ -166,6 +170,7 @@ function deriveChannelEventMetadata(data: unknown): Record<string, unknown> {
   if (isRecord(data.error)) {
     metadata.error_code = stringValue(data.error.code);
     metadata.error_source = stringValue(data.error.source);
+    metadata.error_message = clippedStringValue(data.error.message);
   }
   if (isRecord(data.typing)) {
     metadata.typing_source = stringValue(data.typing.source);
@@ -207,10 +212,37 @@ function deriveMessageDeltaMetadata(data: unknown): Record<string, unknown> {
   if (!isRecord(data)) {
     return { payload_kind: "slock_message_delta" };
   }
-  return compact({
+  const traceMetadata: Record<string, unknown> = {
     payload_kind: "slock_message_delta",
     thread_id: stringValue(data.thread_id),
     delta_kind: stringValue(data.kind),
+  };
+
+  if (data.kind === "status") {
+    traceMetadata.status_text = clippedStringValue(data.text);
+    const statusMetadata = isRecord(data.metadata) ? data.metadata : undefined;
+    if (statusMetadata) {
+      traceMetadata.status_type = stringValue(statusMetadata.type);
+      traceMetadata.status_phase = stringValue(statusMetadata.phase);
+      traceMetadata.status_phase_state = stringValue(statusMetadata.phase_state);
+      traceMetadata.status_tool_call_id = stringValue(statusMetadata.tool_call_id);
+      traceMetadata.status_tool_name = stringValue(statusMetadata.name);
+      traceMetadata.status_tool_state = stringValue(statusMetadata.state);
+      traceMetadata.status_is_error = booleanValue(statusMetadata.is_error);
+    }
+  }
+
+  return compact(traceMetadata);
+}
+
+function deriveRejectMetadata(data: unknown): Record<string, unknown> {
+  if (!isRecord(data) || !isRecord(data.error)) {
+    return { payload_kind: "ipc_reject" };
+  }
+  return compact({
+    payload_kind: "ipc_reject",
+    reject_error_code: stringValue(data.error.code),
+    reject_error_message: clippedStringValue(data.error.message),
   });
 }
 
@@ -315,6 +347,13 @@ function compact(metadata: Record<string, unknown>): Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function clippedStringValue(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  return value.length > 500 ? `${value.slice(0, 497)}...` : value;
 }
 
 function nullableStringValue(value: unknown): string | null | undefined {

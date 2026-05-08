@@ -54,10 +54,19 @@ test("tool-agnostic agent adapter projects runtime events to Slock", async () =>
 
   await waitFor(() => events.some((event) => event.type === "message_created" && event.message?.kind === "agent"));
 
+  const started = events.find((event) => event.type === "agent_run_started");
+  assert.equal(started?.run?.agent, "agent://local/simple-runtime");
+  assert.equal(started?.run?.state, "started");
+  assert.equal(started?.run?.message_id, "channel_msg_1");
+  assert.ok(started?.run?.run_id);
   assert.ok(events.some((event) => event.type === "message_delta" && event.delta?.text.includes("adapter-test received")));
   assert.ok(events.some((event) => event.type === "message_delta" && event.delta?.text.includes("Working on")));
   const finalEvent = events.find((event) => event.type === "message_created" && event.message?.kind === "agent");
   assert.ok(finalEvent?.message?.text.includes("adapter-test says"));
+  const finished = events.find((event) => event.type === "agent_run_finished");
+  assert.equal(finished?.run?.run_id, started?.run?.run_id);
+  assert.equal(finished?.run?.state, "completed");
+  assert.equal(finished?.run?.final_message_id, finalEvent?.message?.id);
 
   await human.close();
   await channel.node.close();
@@ -116,6 +125,7 @@ test("Slock channel can cancel an active agent delta stream", async () => {
   await new Promise((resolve) => setTimeout(resolve, 25));
 
   assert.ok(events.some((event) => event.type === "agent_cancelled" && event.cancelled?.message_id === messageId));
+  assert.ok(events.some((event) => event.type === "agent_run_finished" && event.run?.message_id === messageId && event.run.state === "cancelled"));
   assert.equal(events.some((event) => event.type === "message_delta" && event.delta?.text === "after cancel"), false);
   assert.equal(events.some((event) => event.type === "message_created" && event.message?.kind === "agent"), false);
 

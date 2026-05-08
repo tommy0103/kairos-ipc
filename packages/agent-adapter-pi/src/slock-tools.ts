@@ -111,7 +111,7 @@ export function createPiSlockTools(options: PiSlockToolsOptions = {}): PiSlockTo
     request: SlockApprovalRequest,
   ): Promise<ApprovalOutcome> {
     const approvalTarget = options.approval_uri ?? context.input.sender;
-    const approvalId = request.id ?? `approval_${context.input.message_id}_${toolCall.id}`;
+    const approvalId = request.id ?? `approval_${approvalIdFragment(context.input.channel)}_${context.input.message_id}_${toolCall.id}`;
     const approvalRequest: SlockApprovalRequest = {
       ...request,
       id: approvalId,
@@ -162,6 +162,10 @@ export function createPiSlockTools(options: PiSlockToolsOptions = {}): PiSlockTo
       // Best effort: local abort must not hang while cleaning up remote approval UI.
     }
   }
+}
+
+function approvalIdFragment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "") || "channel";
 }
 
 function createTools(
