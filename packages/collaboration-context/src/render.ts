@@ -1,6 +1,7 @@
 import { currentArtifacts, openDelegations, openTasks, sourceRefKey } from "./reducer.ts";
 import type {
   Artifact,
+  CollaborationNote,
   CollaborationState,
   HumanProjectionItem,
   RenderedAgentContext,
@@ -23,13 +24,26 @@ export function renderForAgent(state: CollaborationState, request: RenderForAgen
     `Kairos collaboration session: ${session.id}`,
     `Audience: ${request.audience}`,
     `Purpose: ${request.purpose}`,
-    "",
-    "Current task state:",
-    ...openTasks(state).map((task) => `- ${task.title} (${task.status}, owner ${task.owner})`),
   ];
 
+  if (session.objective) {
+    lines.push("", "Objective:", session.objective);
+  }
+
+  if (session.acceptance_criteria?.length) {
+    lines.push("", "Acceptance criteria:", ...session.acceptance_criteria.map((item) => `- ${item}`));
+  }
+
+  if (state.constraints.length > 0) {
+    lines.push("", "Constraints:", ...state.constraints.map((item) => `- ${clip(compactValue(item.constraint), 600)}`));
+  }
+
+  lines.push("", "Current task state:", ...openTasks(state).map((task) => `- ${task.title} (${task.status}, owner ${task.owner})`));
+
   if (delegation) {
-    lines.push("", "Your delegation:", `- id: ${delegation.id}`, `- instruction: ${delegation.instruction}`);
+    lines.push("", "Your delegation:", `- id: ${delegation.id}`);
+    if (delegation.role_label ?? delegation.role) lines.push(`- role: ${delegation.role_label ?? delegation.role}`);
+    lines.push(`- instruction: ${delegation.instruction}`);
     if (delegation.expected_output) lines.push(`- expected output: ${delegation.expected_output}`);
   }
 
@@ -37,7 +51,8 @@ export function renderForAgent(state: CollaborationState, request: RenderForAgen
   if (otherDelegations.length > 0) {
     lines.push("", "Other open delegations:");
     for (const item of otherDelegations) {
-      lines.push(`- ${item.assignee}: ${item.instruction} (${item.status})`);
+      const role = item.role_label ?? item.role;
+      lines.push(`- ${item.assignee}${role ? ` as ${role}` : ""}: ${item.instruction} (${item.status})`);
     }
   }
 
@@ -61,13 +76,47 @@ export function renderForAgent(state: CollaborationState, request: RenderForAgen
 
   if (state.decisions.length > 0) {
     lines.push("", "Recorded decisions:");
-    state.decisions.forEach((decision, index) => lines.push(`- decision ${index + 1}: ${clip(compactValue(decision), 600)}`));
+    state.decisions.forEach((decision, index) => lines.push(`- decision ${index + 1}: ${clip(compactValue(decision.decision), 600)}`));
+  }
+
+  const pendingApprovals = Object.values(state.approvals).filter((approval) => approval.status === "pending");
+  if (pendingApprovals.length > 0) {
+    lines.push("", "Pending approvals:");
+    for (const approval of pendingApprovals) {
+      lines.push(`- ${approval.id}: ${approval.tool_endpoint} ${approval.action} (${approval.risk}) ${approval.payload_summary}`);
+    }
+  }
+
+  const validations = Object.values(state.validations).filter((validation) => validation.status === "requested" || validation.status === "running" || validation.status === "failed");
+  if (validations.length > 0) {
+    lines.push("", "Validation state:");
+    for (const validation of validations) {
+      lines.push(`- ${validation.id}: ${validation.status}${validation.summary ? `, ${clip(validation.summary, 400)}` : ""}`);
+    }
+  }
+
+  const notes = visibleNotesForAgent(state, request.audience);
+  if (notes.length > 0) {
+    lines.push("", "Collaboration notes:");
+    for (const note of notes) {
+      const targets = note.to?.length ? ` to ${note.to.join(", ")}` : "";
+      lines.push(`- ${note.from}${targets}: ${clip(note.text, 800)}`);
+    }
   }
 
   lines.push(
     "",
     "Output contract:",
-    "Return a concise, self-contained result for this delegation. The session endpoint will store it as an artifact and project it to the human view.",
+    "Return a concise, self-contained result for this delegation. The session endpoint stores final run output as an artifact.",
+    "Before ending the run or returning final output, you must call ipc_call report_message once with visibility \"human\" unless a human-visible report_message for this delegation has already succeeded.",
+    "For human-visible progress, call ipc_call with target app://kairos/session-manager, action report_message, and payload { session_id, delegation_id, visibility: \"human\", text }.",
+    "Human-visible report_message is an IM status pulse, not a report: one natural plain-text sentence under 80 characters, ideally 6-14 words or a short CJK sentence, no Markdown, no bullets, no headings, no tables, no code fences.",
+    "Use report_message only for current state or a small handoff, such as checking tests, reading a boundary, or handing off to another agent.",
+    "For agent-to-agent coordination notes, call report_message with visibility \"agents\" and to set to the target agent URIs.",
+    "For durable deliverables, call submit_artifact or return final output for the session endpoint to store as an artifact.",
+    "For questions that need an answer from a human or another agent, call ask_question instead of mentioning them in prose.",
+    "For explicit choices learned from context, call record_decision with a short structured decision payload.",
+    "Do not put findings, plans, lists, summaries, or final reports in report_message. Detailed work belongs in the final artifact output or submit_artifact.",
   );
 
   return {
@@ -79,6 +128,15 @@ export function renderForAgent(state: CollaborationState, request: RenderForAgen
     artifact_refs: artifacts.map((artifact) => artifact.id),
     barrier_refs: barriers.map((barrier) => barrier.id),
   };
+}
+
+function visibleNotesForAgent(state: CollaborationState, audience: string): CollaborationNote[] {
+  return Object.values(state.notes).filter((note) => {
+    if (note.from === audience) return true;
+    if (note.visibility === "all") return true;
+    if (note.visibility !== "agents") return false;
+    return !note.to?.length || note.to.includes(audience);
+  });
 }
 
 export function renderForHuman(state: CollaborationState): HumanProjectionItem[] {

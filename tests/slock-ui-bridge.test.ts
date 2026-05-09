@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { inferMentions } from "../packages/slock-channel/src/index.ts";
+import { parseMarkdown, safeHref } from "../packages/slock-ui-bridge/web/src/components/ArtifactMarkdown.ts";
 import { buildTraceView, parseTraceJsonl } from "../packages/slock-ui-bridge/src/index.ts";
 
 test("Slock channel infers mentions from configured aliases", () => {
@@ -32,8 +33,10 @@ test("Slock channel mention aliases can target multiple agents", () => {
 test("UI bridge frontend is implemented as a Vue app", () => {
   const main = readFileSync(new URL("../packages/slock-ui-bridge/web/src/main.ts", import.meta.url), "utf8");
   const app = readFileSync(new URL("../packages/slock-ui-bridge/web/src/App.vue", import.meta.url), "utf8");
+  const server = readFileSync(new URL("../packages/slock-ui-bridge/src/server.ts", import.meta.url), "utf8");
   const theme = readFileSync(new URL("../packages/slock-ui-bridge/web/src/theme/chromatix.config.ts", import.meta.url), "utf8");
   const style = readFileSync(new URL("../packages/slock-ui-bridge/web/src/style.css", import.meta.url), "utf8");
+  const artifactMarkdown = readFileSync(new URL("../packages/slock-ui-bridge/web/src/components/ArtifactMarkdown.ts", import.meta.url), "utf8");
 
   assert.match(main, /createApp\(App\)/);
   assert.match(main, /chromatixPlugin/);
@@ -62,8 +65,43 @@ test("UI bridge frontend is implemented as a Vue app", () => {
   assert.match(app, /class="agent-current-tool"/);
   assert.match(app, /toolInlineEndpointLabel/);
   assert.match(app, /class="endpoint-kind-icon"/);
+  assert.match(app, /type DashboardEvent/);
+  assert.match(app, /\/api\/dashboard/);
+  assert.match(app, /\/api\/sessions\/\$\{encodeURIComponent\(sessionId\)\}\/detail/);
+  assert.match(app, /class="session-detail-view"/);
+  assert.match(app, /class="detail-inspector"/);
+  assert.match(app, /class="review-queue-view"/);
+  assert.match(app, /ArtifactMarkdown/);
+  assert.match(app, /reviewItemMeta/);
+  assert.match(app, /queueDashboardSnapshot/);
+  assert.match(app, /requestAnimationFrame/);
+  assert.match(app, /sessionDetailIsStale/);
+  assert.match(app, /role="tab"/);
+  assert.match(app, /class="session-board"/);
+  assert.match(app, /class="session-work-card"/);
+  assert.match(app, /class="session-inspector"/);
+  assert.match(server, /KAIROS_DASHBOARD_EVENT_MIME/);
+  assert.match(server, /subscribe_dashboard/);
+  assert.match(server, /\/api\/dashboard/);
+  assert.match(server, /\/api\/review-queue/);
+  assert.match(server, /get_session_detail/);
+  assert.match(server, /review_artifact/);
+  assert.match(server, /resolve_approval/);
+  assert.match(style, /\.session-detail-tabs/);
+  assert.match(style, /\.review-queue-item/);
+  assert.match(style, /\.artifact-projection-row/);
+  assert.match(app, /isArtifactProjectionMessage/);
+  assert.match(app, /Open artifact/);
+  assert.match(style, /\.artifact-markdown/);
+  assert.match(artifactMarkdown, /remarkParse/);
+  assert.match(artifactMarkdown, /remarkGfm/);
+  assert.match(artifactMarkdown, /safeHref/);
+  assert.doesNotMatch(artifactMarkdown, /v-html/);
+  assert.match(style, /grid-template-areas:[\s\S]*"work inspector"/);
   assert.doesNotMatch(app, /ensureToolRowInChat/);
   assert.doesNotMatch(app, /class="tool-call activity-row"/);
+  assert.doesNotMatch(app, /class="session-table"/);
+  assert.doesNotMatch(style, /\.session-table/);
   assert.doesNotMatch(style, /max-width: 34ch/);
   assert.match(theme, /DEFAULT_SHADE_CONFIG/);
   for (const shade of ["50", "100", "200", "300", "400", "500", "600", "700", "800", "900", "950"]) {
@@ -74,6 +112,17 @@ test("UI bridge frontend is implemented as a Vue app", () => {
     assert.match(style, new RegExp(`--info-${shade}:`));
     assert.match(style, new RegExp(`--agent-${shade}:`));
   }
+});
+
+test("artifact markdown parser keeps document structure and rejects unsafe hrefs", () => {
+  const tree = parseMarkdown("# Review\n\n- [x] checked\n\n| Area | Risk |\n| --- | --- |\n| UI | low |\n");
+  assert.equal(tree.type, "root");
+  assert.ok(tree.children.some((node) => node.type === "heading"));
+  assert.ok(tree.children.some((node) => node.type === "list"));
+  assert.ok(tree.children.some((node) => node.type === "table"));
+  assert.equal(safeHref("javascript:alert(1)"), undefined);
+  assert.equal(safeHref("https://example.com/review"), "https://example.com/review");
+  assert.equal(safeHref("#section"), "#section");
 });
 
 test("trace viewer builds grouped content-safe timeline data", () => {

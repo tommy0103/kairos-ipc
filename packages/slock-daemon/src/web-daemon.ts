@@ -101,6 +101,7 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
         label: channel.label,
         kind: channel.kind,
       })),
+      session_manager_uri: sessionManagerUri,
       human_node: human.node,
       human_endpoint: human,
       trace_path: tracePath,
@@ -349,7 +350,7 @@ function registryEndpoints(
         uri: sessionManagerUri,
         kind: "app",
         label: "collaboration session manager",
-        description: "Owns collaboration sessions, delegations, artifacts, barriers, and agent context rendering.",
+        description: "Owns collaboration sessions, delegations, artifacts, barriers, short agent reports, and agent context rendering.",
       }
       : undefined,
     ...channels.map((channel) => ({

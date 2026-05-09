@@ -113,7 +113,10 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
       broadcast("message_created", { message });
 
       if (options.session_manager_uri && kind === "human") {
-        void routeMessageToSessionManager(message);
+        void routeMessageToSessionManager(message, {
+          session_id: input.session_id,
+          new_session: input.new_session,
+        });
       } else {
         for (const agentUri of message.mentions) {
           void runMentionedAgent(agentUri, message);
@@ -140,6 +143,14 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
         thread_id: projection.thread_id ?? null,
         reply_to_id: projection.reply_to_id ?? projection.thread_id ?? null,
         kind: projection.kind ?? (projection.sender.startsWith("agent://") ? "agent" : "system"),
+        projection: {
+          presentation: projection.presentation ?? "message",
+          source_event_id: projection.source_event_id,
+          title: projection.title,
+          author: projection.author ?? projection.sender,
+          session_id: projection.session_id,
+          artifact_id: projection.artifact_id,
+        },
       });
 
       broadcast("message_created", { message });
@@ -388,6 +399,7 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
     thread_id?: string | null;
     reply_to_id?: string | null;
     kind: SlockMessage["kind"];
+    projection?: SlockMessage["projection"];
   }): SlockMessage {
     const message: SlockMessage = {
       id: `channel_msg_${nextMessageId++}`,
@@ -399,6 +411,7 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
       reply_to_id: input.reply_to_id ?? null,
       kind: input.kind,
       created_at: new Date().toISOString(),
+      projection: input.projection,
     };
 
     messages.push(message);
@@ -574,7 +587,7 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
     }
   }
 
-  async function routeMessageToSessionManager(message: SlockMessage): Promise<void> {
+  async function routeMessageToSessionManager(message: SlockMessage, route: { session_id?: string; new_session?: boolean } = {}): Promise<void> {
     if (!options.session_manager_uri) return;
     try {
       await node.call(
@@ -582,7 +595,12 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
         "create_or_attach_session",
         {
           mime_type: "application/json",
-          data: { message, mentions: message.mentions },
+          data: {
+            message,
+            mentions: message.mentions,
+            ...(route.session_id ? { session_id: route.session_id } : {}),
+            ...(route.new_session ? { new_session: true } : {}),
+          },
         },
         { ttl_ms: 5000, timeout_ms: 5000 },
       );
@@ -629,6 +647,10 @@ function readProjectionInput(value: unknown): SlockProjectionInput {
     kind: value.kind === "agent" || value.kind === "system" ? value.kind : undefined,
     source_event_id: typeof value.source_event_id === "string" ? value.source_event_id : undefined,
     title: typeof value.title === "string" ? value.title : undefined,
+    presentation: value.presentation === "final_report" ? "final_report" : value.presentation === "artifact" ? "artifact" : value.presentation === "message" ? "message" : undefined,
+    author: typeof value.author === "string" ? value.author : undefined,
+    session_id: typeof value.session_id === "string" ? value.session_id : undefined,
+    artifact_id: typeof value.artifact_id === "string" ? value.artifact_id : undefined,
   };
 }
 

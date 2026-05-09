@@ -6,3 +6,4 @@ dev.docs/
 .DS_Store
 dependencies/
 .configs/
+AGENTS.md

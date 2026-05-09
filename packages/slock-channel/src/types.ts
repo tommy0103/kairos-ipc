@@ -16,6 +16,8 @@ export interface SlockMessageInput {
   mentions?: EndpointUri[];
   thread_id?: string | null;
   reply_to_id?: string | null;
+  session_id?: string;
+  new_session?: boolean;
 }
 
 export interface SlockMessageUpdateInput {
@@ -53,6 +55,19 @@ export interface SlockProjectionInput {
   kind?: "agent" | "system";
   source_event_id?: string;
   title?: string;
+  presentation?: "message" | "artifact" | "final_report";
+  author?: EndpointUri;
+  session_id?: string;
+  artifact_id?: string;
+}
+
+export interface SlockMessageProjection {
+  presentation: "message" | "artifact" | "final_report";
+  source_event_id?: string;
+  title?: string;
+  author?: EndpointUri;
+  session_id?: string;
+  artifact_id?: string;
 }
 
 export interface SlockMessage {
@@ -66,6 +81,7 @@ export interface SlockMessage {
   kind: "human" | "agent" | "system";
   created_at: string;
   updated_at?: string;
+  projection?: SlockMessageProjection;
 }
 
 export interface SlockHistoryRequest {
@@ -149,7 +165,7 @@ export interface SlockAgentRun {
   sender: EndpointUri;
   session_id?: string;
   delegation_id?: string;
-  purpose?: "delegation" | "synthesis" | "review" | "handoff";
+  purpose?: "delegation" | "synthesis" | "review" | "validation" | "handoff";
   context_text?: string;
   source_refs?: unknown[];
   artifact_refs?: string[];

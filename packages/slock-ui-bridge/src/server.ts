@@ -13,6 +13,14 @@ import {
   type SlockChannelEvent,
   type SlockMessage,
 } from "../../slock-channel/src/index.ts";
+import {
+  KAIROS_DASHBOARD_EVENT_MIME,
+  KAIROS_SESSION_STATE_MIME,
+  type SessionManagerDashboardEvent,
+  type SessionManagerDashboardSnapshotResult,
+  type SessionManagerSessionSnapshot,
+  type SessionManagerSessionDetailResult,
+} from "../../session-manager/src/types.ts";
 
 const DEFAULT_ASSET_ROOT = fileURLToPath(new URL("../dist/", import.meta.url));
 
@@ -25,6 +33,7 @@ export interface SlockUiBridgeChannel {
 export interface SlockUiBridgeOptions {
   channel_uri?: EndpointUri;
   channels?: SlockUiBridgeChannel[];
+  session_manager_uri?: EndpointUri;
   human_node: IpcNode;
   human_endpoint?: SlockHumanEndpoint;
   uri?: string;
@@ -49,6 +58,16 @@ interface SseClient {
   close(): void;
 }
 
+type SessionApiRoute =
+  | { kind: "detail"; sessionId: string }
+  | { kind: "close"; sessionId: string }
+  | { kind: "reopen"; sessionId: string }
+  | { kind: "synthesis"; sessionId: string }
+  | { kind: "artifact_review"; sessionId: string; objectId: string }
+  | { kind: "approval_resolve"; sessionId: string; objectId: string }
+  | { kind: "question_answer"; sessionId: string; objectId: string }
+  | { kind: "validation_record"; sessionId: string; objectId: string };
+
 export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridge {
   const node = createNode(options.uri ?? "app://slock/ui-bridge");
   const human = options.human_node;
@@ -56,11 +75,14 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
   const channels = normalizeChannels(options);
   const defaultChannelUri = channels[0].uri;
   const channelUris = new Set(channels.map((channel) => channel.uri));
+  const sessionManagerUri = options.session_manager_uri;
   const historyLimit = options.history_limit ?? 50;
   const assetRoot = resolve(options.asset_root ?? DEFAULT_ASSET_ROOT);
   const tracePath = options.trace_path ? resolve(options.trace_path) : undefined;
   const clients = new Set<SseClient>();
   const approvalChannels = new Map<string, EndpointUri>();
+  let dashboardSubscribed = false;
+  let dashboardSubscribePromise: Promise<void> | undefined;
   let server: Bun.Server | undefined;
 
   node.action(
@@ -72,19 +94,27 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
     },
     async () => ({
       mime_type: "application/json",
-      data: { ok: true, channel: defaultChannelUri, default_channel: defaultChannelUri, channels, clients: clients.size },
+      data: { ok: true, channel: defaultChannelUri, default_channel: defaultChannelUri, channels, session_manager_uri: sessionManagerUri, clients: clients.size },
     }),
   );
 
   human.onEmit("*", (payload) => {
     if (payload.mime_type === SLOCK_CHANNEL_EVENT_MIME) {
       broadcast(payload.data as SlockChannelEvent);
+      return;
+    }
+    if (payload.mime_type === KAIROS_DASHBOARD_EVENT_MIME) {
+      broadcast(payload.data as SessionManagerDashboardEvent);
     }
   });
 
   human.onEnd("*", (payload) => {
     if (payload.mime_type === SLOCK_CHANNEL_EVENT_MIME) {
       broadcast(payload.data as SlockChannelEvent);
+      return;
+    }
+    if (payload.mime_type === KAIROS_DASHBOARD_EVENT_MIME) {
+      broadcast(payload.data as SessionManagerDashboardEvent);
     }
   });
 
@@ -114,6 +144,7 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
       idleTimeout: 0,
       fetch: (request) => handleRequest(request),
     });
+    ensureDashboardSubscription();
 
     return { url: `http://${hostname}:${server.port}` };
   }
@@ -123,6 +154,16 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
       client.close();
     }
     clients.clear();
+
+    if (dashboardSubscribed && sessionManagerUri) {
+      await human.call(sessionManagerUri, "unsubscribe_dashboard", {
+        mime_type: "application/json",
+        data: { reason: "ui bridge closed" },
+      }).catch(() => {
+        // The session manager may already be closed by daemon shutdown.
+      });
+      dashboardSubscribed = false;
+    }
 
     const closing = server;
     server = undefined;
@@ -142,7 +183,7 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
       }
 
       if (request.method === "GET" && url.pathname === "/api/status") {
-        return jsonResponse(200, { ok: true, channel: defaultChannelUri, default_channel: defaultChannelUri, channels, clients: clients.size });
+        return jsonResponse(200, { ok: true, channel: defaultChannelUri, default_channel: defaultChannelUri, channels, session_manager_uri: sessionManagerUri, clients: clients.size });
       }
 
       if (request.method === "GET" && url.pathname === "/api/channels") {
@@ -165,6 +206,30 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
             channel: channelForApproval(approval),
           })),
         });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/sessions") {
+        if (!sessionManagerUri) {
+          return jsonResponse(200, { sessions: [] });
+        }
+        const sessions = await human.call(sessionManagerUri, "list_work_sessions", {
+          mime_type: "application/json",
+          data: {},
+        });
+        return jsonResponse(200, sessions.data);
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/dashboard") {
+        return await readDashboardView();
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/review-queue") {
+        return await readReviewQueueView();
+      }
+
+      const sessionRoute = parseSessionApiPath(url.pathname);
+      if (sessionRoute) {
+        return await handleSessionApiRequest(request, sessionRoute);
       }
 
       if (request.method === "GET" && url.pathname === "/api/trace") {
@@ -232,6 +297,7 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
     let client: SseClient | undefined;
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
+        ensureDashboardSubscription();
         client = {
           write(frame) {
             try {
@@ -263,6 +329,125 @@ export function createSlockUiBridge(options: SlockUiBridgeOptions): SlockUiBridg
         "cache-control": "no-cache, no-transform",
         connection: "keep-alive",
       },
+    });
+  }
+
+  async function readDashboardView(): Promise<Response> {
+    if (!sessionManagerUri) {
+      return jsonResponse(200, emptyDashboardSnapshot());
+    }
+    const dashboard = await human.call<unknown, SessionManagerDashboardSnapshotResult>(sessionManagerUri, "get_dashboard_snapshot", {
+      mime_type: "application/json",
+      data: {},
+    });
+    return jsonResponse(200, dashboard.data);
+  }
+
+  async function readReviewQueueView(): Promise<Response> {
+    if (!sessionManagerUri) {
+      return jsonResponse(200, { items: [] });
+    }
+    const queue = await human.call(sessionManagerUri, "list_review_queue", {
+      mime_type: "application/json",
+      data: {},
+    });
+    return jsonResponse(200, queue.data);
+  }
+
+  async function handleSessionApiRequest(request: Request, route: SessionApiRoute): Promise<Response> {
+    if (!sessionManagerUri) {
+      return jsonResponse(404, { error: "session manager is not configured" });
+    }
+
+    if (request.method === "GET" && route.kind === "detail") {
+      const detail = await human.call<{ session_id: string }, SessionManagerSessionDetailResult>(sessionManagerUri, "get_session_detail", {
+        mime_type: "application/json",
+        data: { session_id: route.sessionId },
+      });
+      const state = await human.call<{ session_id: string }, SessionManagerSessionSnapshot>(sessionManagerUri, "get_session_state", {
+        mime_type: "application/json",
+        data: { session_id: route.sessionId },
+      });
+      return jsonResponse(200, { ...detail.data, events: state.data.events, compactions: state.data.compactions });
+    }
+
+    if (request.method !== "POST") {
+      return jsonResponse(405, { error: "method_not_allowed" });
+    }
+
+    const body = await readJsonBody(request);
+    if (route.kind === "close") {
+      return await forwardSessionAction("close_session", { session_id: route.sessionId, status: readSessionStatus(body), reason: readReason(body) });
+    }
+    if (route.kind === "reopen") {
+      return await forwardSessionAction("reopen_session", { session_id: route.sessionId, reason: readReason(body) });
+    }
+    if (route.kind === "synthesis") {
+      return await forwardSessionAction("request_synthesis", { session_id: route.sessionId, reason: readReason(body) });
+    }
+    if (route.kind === "artifact_review") {
+      return await forwardSessionAction("review_artifact", {
+        session_id: route.sessionId,
+        artifact_id: route.objectId,
+        status: readReviewStatus(body),
+        note: readNote(body),
+        revision_instruction: readRevisionInstruction(body),
+        rerun: isRecord(body) && body.rerun === true ? true : undefined,
+      });
+    }
+    if (route.kind === "approval_resolve") {
+      return await forwardSessionAction("resolve_approval", {
+        session_id: route.sessionId,
+        approval_id: route.objectId,
+        approved: isRecord(body) && typeof body.approved === "boolean" ? body.approved : undefined,
+        status: readApprovalStatus(body),
+        resolution_note: readNote(body),
+      });
+    }
+    if (route.kind === "question_answer") {
+      return await forwardSessionAction("answer_question", {
+        session_id: route.sessionId,
+        question_id: route.objectId,
+        answer: readAnswer(body),
+      });
+    }
+    if (route.kind === "validation_record") {
+      return await forwardSessionAction("record_validation", {
+        session_id: route.sessionId,
+        validation_id: route.objectId,
+        status: readValidationStatus(body),
+        summary: readNote(body),
+      });
+    }
+
+    return jsonResponse(404, { error: "not_found" });
+  }
+
+  async function forwardSessionAction(action: string, data: Record<string, unknown>): Promise<Response> {
+    if (!sessionManagerUri) {
+      return jsonResponse(404, { error: "session manager is not configured" });
+    }
+    const result = await human.call(sessionManagerUri, action, {
+      mime_type: "application/json",
+      data: compactRecord(data),
+    });
+    return jsonResponse(200, result.data);
+  }
+
+  function ensureDashboardSubscription(): void {
+    if (!sessionManagerUri || dashboardSubscribed || dashboardSubscribePromise) {
+      return;
+    }
+    dashboardSubscribePromise = human.call(sessionManagerUri, "subscribe_dashboard", {
+      mime_type: "application/json",
+      data: { include_snapshot: true },
+    }, { timeout_ms: 5000 }).then(() => {
+      dashboardSubscribed = true;
+    }).catch((error) => {
+      dashboardSubscribed = false;
+      broadcastPublishError(sessionManagerUri, "DASHBOARD_SUBSCRIBE_FAILED", error);
+    }).finally(() => {
+      dashboardSubscribePromise = undefined;
     });
   }
 
@@ -511,6 +696,45 @@ function jsonResponse(status: number, body: unknown): Response {
   });
 }
 
+function parseSessionApiPath(pathname: string): SessionApiRoute | undefined {
+  const parts = pathname.split("/").filter(Boolean).map(safeDecodeSegment);
+  if (parts[0] !== "api" || parts[1] !== "sessions" || !parts[2]) {
+    return undefined;
+  }
+  const sessionId = parts[2];
+  if (parts.length === 4 && parts[3] === "detail") return { kind: "detail", sessionId };
+  if (parts.length === 4 && parts[3] === "close") return { kind: "close", sessionId };
+  if (parts.length === 4 && parts[3] === "reopen") return { kind: "reopen", sessionId };
+  if (parts.length === 4 && parts[3] === "synthesis") return { kind: "synthesis", sessionId };
+  if (parts.length === 6 && parts[3] === "artifacts" && parts[5] === "review") return { kind: "artifact_review", sessionId, objectId: parts[4] };
+  if (parts.length === 6 && parts[3] === "approvals" && parts[5] === "resolve") return { kind: "approval_resolve", sessionId, objectId: parts[4] };
+  if (parts.length === 6 && parts[3] === "questions" && parts[5] === "answer") return { kind: "question_answer", sessionId, objectId: parts[4] };
+  if (parts.length === 6 && parts[3] === "validations" && parts[5] === "record") return { kind: "validation_record", sessionId, objectId: parts[4] };
+  return undefined;
+}
+
+function safeDecodeSegment(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch (_error) {
+    throw new HttpError(400, "invalid api path");
+  }
+}
+
+function compactRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+
+function emptyDashboardSnapshot(): SessionManagerDashboardSnapshotResult {
+  return {
+    at: new Date().toISOString(),
+    sequence: 0,
+    sessions: [],
+    review_queue: [],
+    agent_workload: [],
+  };
+}
+
 async function readJsonBody(request: Request): Promise<unknown> {
   const text = await request.text();
   if (text.trim().length === 0) {
@@ -550,6 +774,45 @@ function readReplyToId(value: unknown): string | null {
 
 function readReason(value: unknown): string | undefined {
   return isRecord(value) && typeof value.reason === "string" ? value.reason : undefined;
+}
+
+function readNote(value: unknown): string | undefined {
+  return isRecord(value) && typeof value.note === "string" && value.note.trim().length > 0 ? value.note.trim() : undefined;
+}
+
+function readAnswer(value: unknown): string {
+  if (!isRecord(value) || typeof value.answer !== "string" || value.answer.trim().length === 0) {
+    throw new Error("answer is required");
+  }
+  return value.answer.trim();
+}
+
+function readRevisionInstruction(value: unknown): string | undefined {
+  return isRecord(value) && typeof value.revision_instruction === "string" && value.revision_instruction.trim().length > 0 ? value.revision_instruction.trim() : undefined;
+}
+
+function readSessionStatus(value: unknown): "completed" | "cancelled" | "archived" | undefined {
+  if (!isRecord(value)) return undefined;
+  return value.status === "completed" || value.status === "cancelled" || value.status === "archived" ? value.status : undefined;
+}
+
+function readReviewStatus(value: unknown): "accepted" | "rejected" | "revision_requested" {
+  if (!isRecord(value) || (value.status !== "accepted" && value.status !== "rejected" && value.status !== "revision_requested")) {
+    throw new Error("review status must be accepted, rejected, or revision_requested");
+  }
+  return value.status;
+}
+
+function readApprovalStatus(value: unknown): "approved" | "rejected" | "cancelled" | "expired" | undefined {
+  if (!isRecord(value)) return undefined;
+  return value.status === "approved" || value.status === "rejected" || value.status === "cancelled" || value.status === "expired" ? value.status : undefined;
+}
+
+function readValidationStatus(value: unknown): "running" | "passed" | "failed" | "cancelled" {
+  if (!isRecord(value) || (value.status !== "running" && value.status !== "passed" && value.status !== "failed" && value.status !== "cancelled")) {
+    throw new Error("validation status must be running, passed, failed, or cancelled");
+  }
+  return value.status;
 }
 
 function readApprovalResult(value: unknown): SlockApprovalResult {
