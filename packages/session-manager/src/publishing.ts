@@ -127,9 +127,74 @@ export function createSessionPublisher(node: IpcNode, appendEvent: AppendEvent) 
   };
 }
 
-function artifactProjectionText(_artifact: Artifact, presentation: SlockProjectionInput["presentation"]): string {
+const PROJECTION_PREVIEW_MAX_PARAGRAPHS = 4;
+const PROJECTION_PREVIEW_MAX_PARAGRAPH_CHARS = 220;
+
+function artifactProjectionText(artifact: Artifact, presentation: SlockProjectionInput["presentation"]): string {
+  const preview = compactArtifactPreview(artifact);
   if (presentation === "final_report") {
-    return "Final synthesis ready.";
+    return preview ?? "Final synthesis ready.";
   }
-  return "Artifact ready.";
+  return preview ?? "Artifact ready.";
+}
+
+function compactArtifactPreview(artifact: Artifact): string | undefined {
+  const raw = artifactContentSummary(artifact.content);
+  if (!raw?.trim()) {
+    return undefined;
+  }
+
+  const paragraphs = projectionParagraphs(raw)
+    .slice(0, PROJECTION_PREVIEW_MAX_PARAGRAPHS)
+    .map((paragraph) => clipProjectionParagraph(paragraph));
+
+  return paragraphs.length > 0 ? paragraphs.join("\n\n") : undefined;
+}
+
+function artifactContentSummary(content: unknown): string | undefined {
+  if (typeof content === "string") {
+    return content;
+  }
+  if (!content || typeof content !== "object") {
+    return undefined;
+  }
+  const record = content as Record<string, unknown>;
+  return typeof record.summary === "string"
+    ? record.summary
+    : typeof record.text === "string"
+      ? record.text
+      : typeof record.final_text === "string"
+        ? record.final_text
+        : undefined;
+}
+
+function projectionParagraphs(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const blankLineBlocks = trimmed.split(/\r?\n\s*\r?\n/);
+  const blocks = blankLineBlocks.length > 1 ? blankLineBlocks : trimmed.split(/\r?\n/);
+  return blocks
+    .map((block) => block.split(/\r?\n/).map(sanitizeProjectionLine).filter(Boolean).join(" ").trim())
+    .filter((paragraph) => paragraph.length > 0);
+}
+
+function sanitizeProjectionLine(line: string): string {
+  return line
+    .trim()
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^[-*+]\s+/, "")
+    .replace(/^\d+[.)]\s+/, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .trim();
+}
+
+function clipProjectionParagraph(paragraph: string): string {
+  const chars = Array.from(paragraph);
+  return chars.length <= PROJECTION_PREVIEW_MAX_PARAGRAPH_CHARS
+    ? paragraph
+    : `${chars.slice(0, PROJECTION_PREVIEW_MAX_PARAGRAPH_CHARS - 3).join("")}...`;
 }

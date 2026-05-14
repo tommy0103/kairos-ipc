@@ -5,6 +5,7 @@ import type {
   ArtifactReview,
   CollaborationStatus,
   CollaborationNote,
+  CollaborationNotePurpose,
   CollaborationNoteVisibility,
   CollaborationQuestion,
   ContextCompaction,
@@ -35,6 +36,7 @@ export interface SessionManagerOptions {
   uri?: EndpointUri;
   default_agent_ttl_ms?: number;
   coordinator_uri?: EndpointUri;
+  agent_event_channel_uri?: EndpointUri;
 }
 
 export interface SessionRecord {
@@ -68,6 +70,52 @@ export interface SessionManagerDelegationPlanItem {
   role_label?: string;
   instruction?: string;
   expected_output?: string;
+}
+
+export type SessionManagerDelegationMode = "parallel" | "sequential";
+
+export interface SessionManagerStartDelegationsRequest {
+  session_id: string;
+  task_id?: string;
+  task_title?: string;
+  owner?: EndpointUri;
+  instruction: string;
+  expected_output?: string;
+  mode?: SessionManagerDelegationMode;
+  synthesis_requested?: boolean;
+  synthesis_reason?: string;
+  source_refs?: SourceRef[];
+  delegations: SessionManagerDirectDelegationItem[];
+}
+
+export interface SessionManagerDirectDelegationItem {
+  assignee: EndpointUri;
+  role?: string;
+  role_label?: string;
+  instruction?: string;
+  expected_output?: string;
+}
+
+export interface SessionManagerStartDelegationsResult {
+  session_id: string;
+  task_id: string;
+  delegation_ids: string[];
+  barrier_id?: string;
+  mode: SessionManagerDelegationMode;
+}
+
+export interface SessionManagerCancelDelegationRunRequest {
+  session_id: string;
+  delegation_id: string;
+  reason?: string;
+}
+
+export interface SessionManagerCancelDelegationRunResult {
+  cancelled: boolean;
+  session_id: string;
+  delegation_id: string;
+  agent?: EndpointUri;
+  reason?: string;
 }
 
 export interface SessionManagerRouteMessageResult {
@@ -236,6 +284,7 @@ export interface SessionManagerReportMessageRequest {
   delegation_id?: string;
   to?: EndpointUri[];
   visibility?: CollaborationNoteVisibility;
+  purpose?: CollaborationNotePurpose;
   source_refs?: SourceRef[];
   project?: boolean;
 }

@@ -107,16 +107,20 @@ export function renderForAgent(state: CollaborationState, request: RenderForAgen
   lines.push(
     "",
     "Output contract:",
-    "Return a concise, self-contained result for this delegation. The session endpoint stores final run output as an artifact.",
-    "Before ending the run or returning final output, you must call ipc_call report_message once with visibility \"human\" unless a human-visible report_message for this delegation has already succeeded.",
-    "For human-visible progress, call ipc_call with target app://kairos/session-manager, action report_message, and payload { session_id, delegation_id, visibility: \"human\", text }.",
-    "Human-visible report_message is an IM status pulse, not a report: one natural plain-text sentence under 80 characters, ideally 6-14 words or a short CJK sentence, no Markdown, no bullets, no headings, no tables, no code fences.",
-    "Use report_message only for current state or a small handoff, such as checking tests, reading a boundary, or handing off to another agent.",
+    "Return a layered final result for this delegation. The session endpoint projects the summary into IM and stores the artifact body as the durable artifact.",
+    "For human-visible progress, call ipc_call with target app://kairos/session-manager, action report_message, and payload { session_id, delegation_id, visibility: \"human\", purpose: \"progress\", text }.",
+    "Human-visible progress report_message text is one natural plain-text sentence under 80 characters, ideally 6-14 words or a short CJK sentence.",
+    "Use progress report_message only for current state or a small handoff, such as checking tests, reading a boundary, or handing off to another agent.",
+    "Do not use report_message for final answers. Final answers must be returned as raw output using exactly two sections: Summary: and Artifact:.",
+    "Summary: 2-4 short plain-text paragraphs for the IM timeline. Each paragraph should make one point and can use 1-2 concise sentences.",
+    "Summary should read like a useful human IM update: state the conclusion, explain the key evidence or reason, name important risk, and suggest the next step when relevant.",
+    "Do not use Markdown syntax, headings, bullets, numbered lists, tables, or code in Summary. Keep detailed findings and source-heavy structure in Artifact.",
+    "Artifact: the complete deliverable. Use Markdown here when structure helps, including headings, bullets, tables, code fences, and source references.",
     "For agent-to-agent coordination notes, call report_message with visibility \"agents\" and to set to the target agent URIs.",
-    "For durable deliverables, call submit_artifact or return final output for the session endpoint to store as an artifact.",
+    "For extra durable deliverables during the run, call submit_artifact; otherwise return the final Artifact section for the session endpoint to store.",
     "For questions that need an answer from a human or another agent, call ask_question instead of mentioning them in prose.",
     "For explicit choices learned from context, call record_decision with a short structured decision payload.",
-    "Do not put findings, plans, lists, summaries, or final reports in report_message. Detailed work belongs in the final artifact output or submit_artifact.",
+    "Do not put findings lists, plans, or full reports in report_message. Detailed work belongs in the final Artifact section or submit_artifact.",
   );
 
   return {

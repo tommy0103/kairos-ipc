@@ -5,6 +5,7 @@ import {
   type SessionManagerAnswerQuestionRequest,
   type SessionManagerAskQuestionRequest,
   type SessionManagerAttachSourceRequest,
+  type SessionManagerCancelDelegationRunRequest,
   type SessionManagerCloseSessionRequest,
   type SessionManagerCreateSessionRequest,
   type SessionManagerDashboardSubscriptionRequest,
@@ -25,6 +26,7 @@ import {
   type SessionManagerReviewArtifactRequest,
   type SessionManagerRouteMessageRequest,
   type SessionManagerRunValidationRequest,
+  type SessionManagerStartDelegationsRequest,
   type SessionManagerSubmitArtifactRequest,
   type SessionManagerUpdateSessionGoalRequest,
 } from "./types.ts";
@@ -79,6 +81,50 @@ export function readCreateSessionRequest(value: unknown): SessionManagerCreateSe
     owner: typeof value.owner === "string" ? value.owner : undefined,
     message: isSlockMessage(value.message) ? value.message : undefined,
     source_ref: isSourceRef(value.source_ref) ? value.source_ref : undefined,
+  };
+}
+
+export function readStartDelegationsRequest(value: unknown): SessionManagerStartDelegationsRequest {
+  if (!isRecord(value) || typeof value.session_id !== "string" || value.session_id.trim().length === 0) {
+    throw new Error("start_delegations requires session_id");
+  }
+  if (typeof value.instruction !== "string" || value.instruction.trim().length === 0) {
+    throw new Error("start_delegations requires non-empty instruction");
+  }
+  const delegations = readDirectDelegations(value.delegations);
+  if (delegations.length === 0) {
+    throw new Error("start_delegations requires at least one delegation assignee");
+  }
+  const duplicateAssignee = firstDuplicate(delegations.map((delegation) => delegation.assignee));
+  if (duplicateAssignee) {
+    throw new Error(`start_delegations rejects duplicate delegation assignee: ${duplicateAssignee}`);
+  }
+  return {
+    session_id: value.session_id.trim(),
+    task_id: typeof value.task_id === "string" && value.task_id.trim().length > 0 ? value.task_id.trim() : undefined,
+    task_title: typeof value.task_title === "string" && value.task_title.trim().length > 0 ? value.task_title.trim() : undefined,
+    owner: typeof value.owner === "string" && value.owner.trim().length > 0 ? value.owner.trim() : undefined,
+    instruction: value.instruction.trim(),
+    expected_output: typeof value.expected_output === "string" && value.expected_output.trim().length > 0 ? value.expected_output.trim() : undefined,
+    mode: value.mode === "sequential" ? "sequential" : value.mode === "parallel" ? "parallel" : undefined,
+    synthesis_requested: typeof value.synthesis_requested === "boolean" ? value.synthesis_requested : undefined,
+    synthesis_reason: typeof value.synthesis_reason === "string" && value.synthesis_reason.trim().length > 0 ? value.synthesis_reason.trim() : undefined,
+    source_refs: Array.isArray(value.source_refs) ? value.source_refs.filter(isSourceRef) : undefined,
+    delegations,
+  };
+}
+
+export function readCancelDelegationRunRequest(value: unknown): SessionManagerCancelDelegationRunRequest {
+  if (!isRecord(value) || typeof value.session_id !== "string" || value.session_id.trim().length === 0) {
+    throw new Error("cancel_delegation_run requires session_id");
+  }
+  if (typeof value.delegation_id !== "string" || value.delegation_id.trim().length === 0) {
+    throw new Error("cancel_delegation_run requires delegation_id");
+  }
+  return {
+    session_id: value.session_id.trim(),
+    delegation_id: value.delegation_id.trim(),
+    reason: typeof value.reason === "string" && value.reason.trim().length > 0 ? value.reason.trim() : undefined,
   };
 }
 
@@ -337,6 +383,7 @@ export function readReportMessageRequest(value: unknown): SessionManagerReportMe
     delegation_id: typeof value.delegation_id === "string" ? value.delegation_id : undefined,
     to: Array.isArray(value.to) ? uniqueEndpointUris(value.to) : undefined,
     visibility: readNoteVisibility(value.visibility),
+    purpose: value.purpose === "final_summary" ? "final_summary" : value.purpose === "progress" ? "progress" : undefined,
     source_refs: Array.isArray(value.source_refs) ? value.source_refs.filter(isSourceRef) : undefined,
     project: value.project === false ? false : undefined,
   };
@@ -437,6 +484,35 @@ function readDelegationPlan(value: unknown): SessionManagerRouteMessageRequest["
       expected_output: typeof item.expected_output === "string" ? item.expected_output : undefined,
     }];
   });
+}
+
+function readDirectDelegations(value: unknown): SessionManagerStartDelegationsRequest["delegations"] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    if (!isRecord(item) || typeof item.assignee !== "string" || item.assignee.trim().length === 0) {
+      return [];
+    }
+    return [{
+      assignee: item.assignee.trim(),
+      role: typeof item.role === "string" && item.role.trim().length > 0 ? item.role.trim() : undefined,
+      role_label: typeof item.role_label === "string" && item.role_label.trim().length > 0 ? item.role_label.trim() : undefined,
+      instruction: typeof item.instruction === "string" && item.instruction.trim().length > 0 ? item.instruction.trim() : undefined,
+      expected_output: typeof item.expected_output === "string" && item.expected_output.trim().length > 0 ? item.expected_output.trim() : undefined,
+    }];
+  });
+}
+
+function firstDuplicate(values: string[]): string | undefined {
+  const seen = new Set<string>();
+  for (const value of values) {
+    if (seen.has(value)) {
+      return value;
+    }
+    seen.add(value);
+  }
+  return undefined;
 }
 
 function readStringArray(value: unknown): string[] | undefined {

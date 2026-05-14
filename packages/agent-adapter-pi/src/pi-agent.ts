@@ -113,7 +113,9 @@ export function createPiRuntime<TApi extends Api = Api>(options: PiRuntimeOption
               yield phaseStatusEvent(input.message_id, "model", "streaming", "Model stream is responding.");
             }
             streamedText += event.delta;
-            yield { type: "message_delta", thread_id: input.message_id, text: event.delta };
+            if (!input.session_id) {
+              yield { type: "message_delta", thread_id: input.message_id, text: event.delta };
+            }
             continue;
           }
 
@@ -140,12 +142,12 @@ export function createPiRuntime<TApi extends Api = Api>(options: PiRuntimeOption
 
         const toolCalls = message.content.filter(isToolCall);
         if (message.stopReason !== "toolUse" || toolCalls.length === 0) {
-          yield finalEvent(message, streamedText || lastStreamedText);
+          yield finalEvent(input, message, streamedText || lastStreamedText);
           return;
         }
 
         if (!options.execute_tool) {
-          yield finalEvent(message, streamedText || lastStreamedText);
+          yield finalEvent(input, message, streamedText || lastStreamedText);
           return;
         }
 
@@ -267,13 +269,15 @@ function toolResultText(result: ToolResultMessage): string {
     .trim();
 }
 
-function finalEvent(message: AssistantMessage, streamedText: string): AgentRuntimeEvent {
+function finalEvent(input: SlockAgentRun, message: AssistantMessage, streamedText: string): AgentRuntimeEvent {
   const finalText = assistantText(message) || streamedText || fallbackText(message);
+  const layered = input.session_id ? parseLayeredFinalText(finalText) : undefined;
+  const fallbackSummary = summaryText(message, finalText);
   return {
     type: "final",
     result: {
-      summary: summaryText(message, finalText),
-      final_text: finalText,
+      summary: layered?.summary ?? (input.session_id ? compactSummaryFromText(fallbackSummary) : fallbackSummary),
+      final_text: layered?.artifact ?? finalText,
     },
   };
 }
@@ -611,6 +615,83 @@ function summaryText(message: AssistantMessage, finalText: string): string {
     return "pi-ai stopped because the response reached its length limit.";
   }
   return finalText;
+}
+
+const SESSION_SUMMARY_MAX_PARAGRAPHS = 4;
+const SESSION_SUMMARY_PARAGRAPH_MAX_CHARS = 220;
+
+function parseLayeredFinalText(text: string): { summary: string; artifact: string } | undefined {
+  const buckets: Record<"summary" | "artifact", string[]> = { summary: [], artifact: [] };
+  let current: "summary" | "artifact" | undefined;
+
+  for (const line of text.split(/\r?\n/)) {
+    const marker = finalSectionMarker(line);
+    if (marker) {
+      current = marker.section;
+      if (marker.rest.trim()) {
+        buckets[current].push(marker.rest.trim());
+      }
+      continue;
+    }
+    if (current) {
+      buckets[current].push(line);
+    }
+  }
+
+  const summary = compactSummaryFromText(buckets.summary.join("\n"));
+  const artifact = buckets.artifact.join("\n").trim();
+  return summary && artifact ? { summary, artifact } : undefined;
+}
+
+function finalSectionMarker(line: string): { section: "summary" | "artifact"; rest: string } | undefined {
+  const match = line.match(/^\s*(summary|visible summary|user summary|摘要|artifact|artifact body|full artifact|完整内容|详情)\s*[:：]\s*(.*)$/i);
+  if (!match) {
+    return undefined;
+  }
+  const label = match[1]?.toLowerCase();
+  const rest = match[2] ?? "";
+  return label === "summary" || label === "visible summary" || label === "user summary" || label === "摘要"
+    ? { section: "summary", rest }
+    : { section: "artifact", rest };
+}
+
+function compactSummaryFromText(text: string): string {
+  const paragraphs = summaryParagraphs(text)
+    .slice(0, SESSION_SUMMARY_MAX_PARAGRAPHS)
+    .map((paragraph) => clipSummaryParagraph(paragraph));
+
+  return paragraphs.length > 0 ? paragraphs.join("\n\n") : "Agent completed.";
+}
+
+function summaryParagraphs(text: string): string[] {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const blankLineBlocks = trimmed.split(/\r?\n\s*\r?\n/);
+  const blocks = blankLineBlocks.length > 1 ? blankLineBlocks : trimmed.split(/\r?\n/);
+  return blocks
+    .map((block) => block.split(/\r?\n/).map(sanitizeSummaryLine).filter(Boolean).join(" ").trim())
+    .filter((paragraph) => paragraph.length > 0);
+}
+
+function sanitizeSummaryLine(line: string): string {
+  return line
+    .trim()
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^[-*+]\s+/, "")
+    .replace(/^\d+[.)]\s+/, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .trim();
+}
+
+function clipSummaryParagraph(paragraph: string): string {
+  const chars = Array.from(paragraph);
+  return chars.length <= SESSION_SUMMARY_PARAGRAPH_MAX_CHARS
+    ? paragraph
+    : `${chars.slice(0, SESSION_SUMMARY_PARAGRAPH_MAX_CHARS - 3).join("")}...`;
 }
 
 function fallbackText(message: AssistantMessage): string {

@@ -47,9 +47,10 @@ test("agent renderer gives delegation-specific context without losing shared art
   assert.match(context.text, /Native camera and IAP are feasible/);
   assert.match(context.text, /Collaboration notes:/);
   assert.match(context.text, /Please compare native-module risk against Expo config plugins/);
-  assert.match(context.text, /Before ending the run or returning final output/);
-  assert.match(context.text, /IM status pulse, not a report/);
-  assert.match(context.text, /under 80 characters/);
+  assert.match(context.text, /Final answers must be returned as raw output using exactly two sections/);
+  assert.match(context.text, /2-4 short plain-text paragraphs/);
+  assert.match(context.text, /Summary:/);
+  assert.match(context.text, /Artifact:/);
   assert.deepEqual(context.artifact_refs.sort(), ["artifact_expo", "artifact_native"]);
   assert.ok(context.source_refs.some((ref) => ref.kind === "channel_message" && ref.message_id === "channel_msg_1"));
 });
@@ -75,6 +76,7 @@ test("work projection renders an agile session dashboard summary", () => {
   assert.equal(projection?.blockers.length, 0);
   assert.ok(projection?.latest_report?.includes("Expo is fastest"));
   assert.ok(projection?.actions.some((action) => action.kind === "open_thread"));
+  assert.equal(projection?.build_board, undefined);
 });
 
 test("collaboration reducer and projections preserve production workflow gates", () => {
@@ -203,6 +205,11 @@ test("collaboration reducer and projections preserve production workflow gates",
   assert.match(projection?.phase_reason ?? "", /failed/i);
   assert.ok(projection?.blockers.some((blocker) => blocker.kind === "pending_approval"));
   assert.ok(projection?.blockers.some((blocker) => blocker.kind === "revision_requested"));
+  assert.ok(projection?.build_board?.active);
+  assert.ok(projection?.build_board?.write_operations.some((operation) => operation.endpoint === "plugin://local/shell" && operation.action === "exec"));
+  assert.ok(projection?.build_board?.columns.find((column) => column.key === "building")?.items.some((item) => item.kind === "approval" && item.id === "approval_shell"));
+  assert.ok(projection?.build_board?.columns.find((column) => column.key === "review")?.items.some((item) => item.kind === "artifact" && item.id === "artifact_expo"));
+  assert.ok(projection?.build_board?.columns.find((column) => column.key === "validate")?.items.some((item) => item.kind === "validation" && item.id === "validation_mobile"));
 
   const queue = renderReviewQueue([state]);
   assert.ok(queue.some((item) => item.id === "artifact:artifact_expo"));
@@ -218,6 +225,7 @@ test("collaboration reducer and projections preserve production workflow gates",
   assert.equal(detail?.constraints.length, 1);
   assert.equal(detail?.approvals.length, 1);
   assert.equal(detail?.validations.length, 1);
+  assert.equal(detail?.session.build_board?.columns.length, 5);
 });
 
 test("work projection phase precedence is deterministic across mixed workflow signals", () => {

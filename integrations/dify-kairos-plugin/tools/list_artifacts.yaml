@@ -1,0 +1,22 @@
+identity:
+  name: list_artifacts
+  author: tomiya
+  label:
+    en_US: List Kairos artifacts
+    zh_Hans: 列出 Kairos artifacts
+description:
+  human:
+    en_US: List artifact metadata for a Kairos session without full artifact bodies.
+    zh_Hans: 列出 Kairos session 的 artifact 元数据，不包含完整正文。
+  llm: List artifact metadata for a session.
+parameters:
+  - name: session_id
+    type: string
+    required: true
+    label:
+      en_US: Session id
+      zh_Hans: Session id
+    form: llm
+extra:
+  python:
+    source: tools/list_artifacts.py

@@ -18,6 +18,7 @@ export interface ActiveSessionRun {
   message: SlockMessage;
   correlation_id: string;
   started_at: string;
+  barrier_id?: string;
   cancel_requested?: boolean;
   reason?: string;
 }
@@ -34,6 +35,7 @@ export function createSessionStore(options: SessionStoreOptions = {}) {
   const threadIndex = new Map<string, string>();
   const activeChannelSessionIndex = new Map<EndpointUri, string>();
   const activeRunsByMessage = new Map<string, Map<EndpointUri, ActiveSessionRun>>();
+  const activeRunsByDelegation = new Map<string, ActiveSessionRun>();
   let eventCounter = 1;
   let artifactCounter = 1;
   let questionCounter = 1;
@@ -227,6 +229,7 @@ export function createSessionStore(options: SessionStoreOptions = {}) {
     const runs = activeRunsByMessage.get(run.message.id) ?? new Map<EndpointUri, ActiveSessionRun>();
     activeRunsByMessage.set(run.message.id, runs);
     runs.set(run.agent, run);
+    activeRunsByDelegation.set(run.delegation_id, run);
   }
 
   function forgetActiveRun(run: ActiveSessionRun): void {
@@ -234,6 +237,9 @@ export function createSessionStore(options: SessionStoreOptions = {}) {
     runs?.delete(run.agent);
     if (runs?.size === 0) {
       activeRunsByMessage.delete(run.message.id);
+    }
+    if (activeRunsByDelegation.get(run.delegation_id) === run) {
+      activeRunsByDelegation.delete(run.delegation_id);
     }
   }
 
@@ -279,6 +285,7 @@ export function createSessionStore(options: SessionStoreOptions = {}) {
   return {
     sessions,
     activeRunsByMessage,
+    activeRunsByDelegation,
     createSessionForMessage,
     createSession,
     createManualTask,

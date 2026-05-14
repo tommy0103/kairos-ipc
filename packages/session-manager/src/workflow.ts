@@ -18,6 +18,7 @@ import {
   uniqueSourceRefsForSession,
 } from "./helpers.ts";
 import type { SessionManagerDelegationPlanItem, SessionRecord } from "./types.ts";
+import type { SessionManagerStartDelegationsRequest } from "./types.ts";
 
 type AppendEvent = (
   record: SessionRecord,
@@ -216,6 +217,98 @@ export function createSessionWorkflow(options: SessionWorkflowOptions) {
     return delegation;
   }
 
+  function createDirectDelegations(
+    record: SessionRecord,
+    request: SessionManagerStartDelegationsRequest,
+    owner: EndpointUri,
+  ): { taskId: string; delegationIds: string[]; barrierId?: string } {
+    const at = new Date().toISOString();
+    const sourceRefs = uniqueSourceRefsForSession(request.source_refs?.length
+      ? request.source_refs
+      : record.state.session?.origin
+        ? [record.state.session.origin]
+        : [{ kind: "external", uri: record.uri, label: "direct delegation" }]);
+    const task = ensureDirectTask(record, request, owner, sourceRefs, at);
+    const delegationIds: string[] = [];
+    const nextDelegationIndex = Object.keys(record.state.delegations).length + 1;
+
+    request.delegations.forEach((item, index) => {
+      const delegation: Delegation = {
+        id: `delegation_direct_${slug(record.id)}_${nextDelegationIndex + index}`,
+        session_id: record.id,
+        task_id: task.id,
+        assignee: item.assignee,
+        role: item.role,
+        role_label: item.role_label,
+        instruction: item.instruction ? `${request.instruction}\n\nDelegation focus:\n${item.instruction}` : request.instruction,
+        expected_output: item.expected_output ?? request.expected_output ?? "Submit a concise artifact that can stand alone in the collaboration session.",
+        status: "pending",
+        source_refs: sourceRefs,
+      };
+      delegationIds.push(delegation.id);
+      appendEvent(record, { type: "delegation_created", delegation }, at);
+    });
+
+    if (delegationIds.length === 0) {
+      return { taskId: task.id, delegationIds };
+    }
+
+    const barrier: ReplyBarrier = {
+      id: `barrier_direct_${slug(record.id)}_${Object.keys(record.state.barriers).length + 1}`,
+      session_id: record.id,
+      task_id: task.id,
+      source_ref: sourceRefs[0] ?? { kind: "external", uri: record.uri, label: "direct delegation" },
+      owner,
+      expected_from: request.delegations.map((item) => item.assignee),
+      notify: options.coordinator_uri ? [options.coordinator_uri] : [],
+      mode: "all",
+      synthesis_requested: request.synthesis_requested,
+      synthesis_reason: request.synthesis_requested ? request.synthesis_reason ?? "explicit direct delegation request" : undefined,
+      status: "open",
+      replies: {},
+      created_at: at,
+    };
+    appendEvent(record, { type: "barrier_created", barrier }, at);
+
+    return { taskId: task.id, delegationIds, barrierId: barrier.id };
+  }
+
+  function ensureDirectTask(
+    record: SessionRecord,
+    request: SessionManagerStartDelegationsRequest,
+    owner: EndpointUri,
+    sourceRefs: SourceRef[],
+    at: string,
+  ): Task {
+    if (request.task_id) {
+      const existing = record.state.tasks[request.task_id];
+      if (!existing) {
+        throw new Error(`task not found: ${request.task_id}`);
+      }
+      if (existing.status !== "open") {
+        appendEvent(record, {
+          type: "task_updated",
+          session_id: record.id,
+          task_id: existing.id,
+          patch: { status: "open", updated_at: at },
+        }, at);
+        return record.state.tasks[existing.id] ?? existing;
+      }
+      return existing;
+    }
+
+    const task: Task = {
+      id: `task_direct_${slug(record.id)}_${Object.keys(record.state.tasks).length + 1}`,
+      session_id: record.id,
+      title: taskTitle(request.task_title ?? request.instruction),
+      owner,
+      status: "open",
+      source_refs: sourceRefs,
+    };
+    appendEvent(record, { type: "task_created", task }, at);
+    return task;
+  }
+
   function supersedeArtifact(record: SessionRecord, artifactId: string, at = new Date().toISOString()): void {
     const artifact = record.state.artifacts[artifactId];
     if (!artifact || artifact.status === "superseded") {
@@ -265,6 +358,7 @@ export function createSessionWorkflow(options: SessionWorkflowOptions) {
   return {
     routeHumanMentions,
     createQuestionDelegation,
+    createDirectDelegations,
   };
 }
 

@@ -3,12 +3,14 @@ import { join } from "node:path";
 import { getModel, type Api, type Model } from "@mariozechner/pi-ai";
 import { createMockAgent } from "../../agent-adapter-mock/src/index.ts";
 import { createPiAgent, createPiSlockTools } from "../../agent-adapter-pi/src/index.ts";
+import { createDifyBridge, type DifyBridge } from "../../dify-bridge/src/index.ts";
 import { AllowAllCapabilityGate } from "../../kernel/src/capability.ts";
 import type { Connection } from "../../kernel/src/registry.ts";
 import { EndpointRegistry } from "../../kernel/src/registry.ts";
 import { Router } from "../../kernel/src/router.ts";
 import { TraceWriter } from "../../kernel/src/trace.ts";
 import { createUnixNdjsonKernel } from "../../kernel/src/transport/unix-ndjson.ts";
+import { createMattermostBridge, type MattermostBridge } from "../../mattermost-bridge/src/index.ts";
 import { createBrowserPlugin, createCalculatorPlugin, createReMeMemoryPlugin, createShellPlugin, createWorkspacePlugin } from "../../plugins-demo/src/index.ts";
 import type { ClientFrame, EndpointUri, KernelFrame } from "../../protocol/src/index.ts";
 import type { IpcNode } from "../../sdk/src/index.ts";
@@ -23,6 +25,8 @@ import { createSlockRegistry, SLOCK_REGISTRY_URI, type SlockRegistryEndpoint } f
 export interface SlockWebDaemon {
   config: SlockWebDaemonConfig;
   url?: string;
+  dify_bridge_url?: string;
+  mattermost_bridge_url?: string;
   socket_path: string;
   trace_path: string;
   ipc_address: string;
@@ -63,7 +67,9 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
   const grantStore = createSlockGrantStore();
   const kernel = await createKernelRuntime(resolved.kernel?.transport ?? "unix", socketPath, tracePath);
   const connected: IpcNode[] = [];
-  let bridge: SlockUiBridge | undefined;
+  let uiBridge: SlockUiBridge | undefined;
+  let difyBridge: DifyBridge | undefined;
+  let mattermostBridge: MattermostBridge | undefined;
 
   try {
     const human = createSlockHuman({
@@ -85,15 +91,29 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
         uri: sessionManagerUri,
         default_agent_ttl_ms: resolved.collaboration?.default_agent_ttl_ms,
         coordinator_uri: resolved.collaboration?.coordinator_uri,
+        agent_event_channel_uri: channelUri,
       })
       : undefined;
     const agents = agentConfigs.map((agent) => createDaemonAgent(agent, resolved, registryUri, workspaceUri, shellUri, calculatorUri, browserUri, memoryUri, sessionManagerUri));
     const registry = createSlockRegistry({
       uri: registryUri,
-      endpoints: registryEndpoints(resolved, humanUri, resolved.ui_uri, sessionManagerUri, channelConfigs, agentConfigs, workspaceUri, shellUri, calculatorUri, browserUri, memoryUri),
+      endpoints: registryEndpoints(
+        resolved,
+        humanUri,
+        resolved.ui_uri,
+        sessionManagerUri,
+        resolved.mattermost_bridge?.enabled ? "app://kairos/mattermost-bridge" : undefined,
+        channelConfigs,
+        agentConfigs,
+        workspaceUri,
+        shellUri,
+        calculatorUri,
+        browserUri,
+        memoryUri,
+      ),
     });
 
-    bridge = createSlockUiBridge({
+    uiBridge = createSlockUiBridge({
       uri: resolved.ui_uri,
       channel_uri: channelUri,
       channels: channelConfigs.map((channel) => ({
@@ -107,10 +127,54 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
       trace_path: tracePath,
     });
 
+    if (resolved.dify_bridge?.enabled) {
+      if (!sessionManagerUri) {
+        throw new Error("Dify bridge requires collaboration.enabled and collaboration.session_manager_uri");
+      }
+      difyBridge = createDifyBridge({
+        human_node: human.node,
+        human_endpoint: human,
+        session_manager_uri: sessionManagerUri,
+        trace_path: tracePath,
+        auth_token: resolved.dify_bridge.auth_token,
+        allow_unauthenticated: resolved.dify_bridge.allow_unauthenticated,
+        allowed_origins: resolved.dify_bridge.allowed_origins,
+        max_body_bytes: resolved.dify_bridge.max_body_bytes,
+      });
+    }
+
+    if (resolved.mattermost_bridge?.enabled) {
+      if (!sessionManagerUri) {
+        throw new Error("Mattermost bridge requires collaboration.enabled and collaboration.session_manager_uri");
+      }
+      mattermostBridge = createMattermostBridge({
+        human_node: human.node,
+        session_manager_uri: sessionManagerUri,
+        trace_path: tracePath,
+        mattermost_base_url: required(resolved.mattermost_bridge.mattermost_base_url, "mattermost_bridge.mattermost_base_url"),
+        bot_token: required(resolved.mattermost_bridge.bot_token, "mattermost_bridge.bot_token"),
+        slash_command_token: resolved.mattermost_bridge.slash_command_token,
+        allowed_team_ids: resolved.mattermost_bridge.allowed_team_ids,
+        allowed_user_ids: resolved.mattermost_bridge.allowed_user_ids,
+        allowed_origins: resolved.mattermost_bridge.allowed_origins,
+        require_origin: resolved.mattermost_bridge.require_origin,
+        bridge_public_url: resolved.mattermost_bridge.public_url,
+        max_body_bytes: resolved.mattermost_bridge.max_body_bytes,
+        mattermost_request_timeout_ms: resolved.mattermost_bridge.mattermost_request_timeout_ms,
+        callback_token_ttl_ms: resolved.mattermost_bridge.callback_token_ttl_ms,
+        max_projection_posts: resolved.mattermost_bridge.max_projection_posts,
+        allowed_agent_uris: resolved.mattermost_bridge.allowed_agent_uris,
+        default_agents: resolved.mattermost_bridge.default_agents,
+        agent_aliases: resolved.mattermost_bridge.agent_aliases,
+      });
+    }
+
     const nodes: IpcNode[] = [
       registry.node,
       human.node,
-      bridge.node,
+      uiBridge.node,
+      ...(difyBridge ? [difyBridge.node] : []),
+      ...(mattermostBridge ? [mattermostBridge.node] : []),
       ...(sessionManager ? [sessionManager.node] : []),
       ...channels.map((channel) => channel.node),
       ...agents.map((agent) => agent.node),
@@ -170,10 +234,18 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
 
     const listenResult = resolved.listen === false
       ? undefined
-      : await bridge.listen({ host: resolved.host, port: resolved.port ?? 5173 });
+      : await uiBridge.listen({ host: resolved.host, port: resolved.port ?? 5173 });
+    const difyListenResult = difyBridge
+      ? await difyBridge.listen({ host: resolved.dify_bridge?.host, port: resolved.dify_bridge?.port ?? 5180 })
+      : undefined;
+    const mattermostListenResult = mattermostBridge
+      ? await mattermostBridge.listen({ host: resolved.mattermost_bridge?.host, port: resolved.mattermost_bridge?.port ?? 5190 })
+      : undefined;
     return {
       config: resolved,
       url: listenResult?.url,
+      dify_bridge_url: difyListenResult?.url,
+      mattermost_bridge_url: mattermostListenResult?.url,
       socket_path: socketPath,
       trace_path: tracePath,
       ipc_address: ipcAddress,
@@ -184,12 +256,41 @@ export async function createSlockWebDaemon(config: SlockWebDaemonConfig = {}): P
       channel_uri: channelUri,
       channel_uris: channelUris,
       workspace_root: workspaceRoot,
-      close: () => closeDaemon(bridge, connected, kernel),
+      close: () => closeDaemon(uiBridge, difyBridge, mattermostBridge, connected, kernel),
     };
   } catch (error) {
-    await closeDaemon(bridge, connected, kernel);
+    await closeDaemon(uiBridge, difyBridge, mattermostBridge, connected, kernel);
     throw error;
   }
+}
+
+export function createSlockWebDaemonRegistryEndpoints(config: SlockWebDaemonConfig = {}): SlockRegistryEndpoint[] {
+  const resolved = resolveSlockWebDaemonConfig(config);
+  const channelConfigs = resolved.channels?.length
+    ? resolved.channels
+    : [{ uri: required(resolved.channel_uri, "channel_uri"), ...resolved.channel }];
+  const sessionManagerUri = resolved.collaboration?.enabled === false ? undefined : required(resolved.collaboration?.session_manager_uri, "collaboration.session_manager_uri");
+  const humanUri = required(resolved.human_uri, "human_uri");
+  const agentConfigs = resolved.agents?.length ? resolved.agents : [required(resolved.agent, "agent")];
+  const workspaceUri = required(resolved.plugins?.workspace?.uri, "plugins.workspace.uri");
+  const shellUri = required(resolved.plugins?.shell?.uri, "plugins.shell.uri");
+  const calculatorUri = required(resolved.plugins?.calculator?.uri, "plugins.calculator.uri");
+  const browserUri = required(resolved.plugins?.browser?.uri, "plugins.browser.uri");
+  const memoryUri = required(resolved.plugins?.memory?.uri, "plugins.memory.uri");
+  return registryEndpoints(
+    resolved,
+    humanUri,
+    resolved.ui_uri,
+    sessionManagerUri,
+    resolved.mattermost_bridge?.enabled ? "app://kairos/mattermost-bridge" : undefined,
+    channelConfigs,
+    agentConfigs,
+    workspaceUri,
+    shellUri,
+    calculatorUri,
+    browserUri,
+    memoryUri,
+  );
 }
 
 interface KernelRuntime {
@@ -209,13 +310,27 @@ async function createKernelRuntime(transport: "unix" | "memory", socketPath: str
   return createMemoryKernelRuntime(tracePath);
 }
 
-async function closeDaemon(bridge: SlockUiBridge | undefined, nodes: IpcNode[], kernel: KernelRuntime): Promise<void> {
-  if (bridge) {
-    await bridge.close().catch(() => undefined);
+async function closeDaemon(
+  uiBridge: SlockUiBridge | undefined,
+  difyBridge: DifyBridge | undefined,
+  mattermostBridge: MattermostBridge | undefined,
+  nodes: IpcNode[],
+  kernel: KernelRuntime,
+): Promise<void> {
+  if (mattermostBridge) {
+    await mattermostBridge.close().catch(() => undefined);
+  }
+
+  if (difyBridge) {
+    await difyBridge.close().catch(() => undefined);
+  }
+
+  if (uiBridge) {
+    await uiBridge.close().catch(() => undefined);
   }
 
   for (const node of [...nodes].reverse()) {
-    if (bridge && node === bridge.node) {
+    if ((uiBridge && node === uiBridge.node) || (difyBridge && node === difyBridge.node) || (mattermostBridge && node === mattermostBridge.node)) {
       continue;
     }
     await node.close().catch(() => undefined);
@@ -294,6 +409,7 @@ function registryEndpoints(
   humanUri: string,
   uiUri: string | undefined,
   sessionManagerUri: EndpointUri | undefined,
+  mattermostBridgeUri: EndpointUri | undefined,
   channels: Array<{ uri: string; label?: string; kind?: string }>,
   agents: SlockWebAgentConfig[],
   workspaceUri: string,
@@ -351,6 +467,15 @@ function registryEndpoints(
         kind: "app",
         label: "collaboration session manager",
         description: "Owns collaboration sessions, delegations, artifacts, barriers, short agent reports, and agent context rendering.",
+      }
+      : undefined,
+    mattermostBridgeUri
+      ? {
+        uri: mattermostBridgeUri,
+        kind: "app",
+        label: "Mattermost bridge",
+        description: "Mattermost slash command, interactive action, dialog, and projection bridge.",
+        internal: true,
       }
       : undefined,
     ...channels.map((channel) => ({

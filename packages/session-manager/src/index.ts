@@ -44,6 +44,7 @@ import {
 import {
   readAttachSourceRequest,
   readCancelAgentRunRequest,
+  readCancelDelegationRunRequest,
   readCloseSessionRequest,
   readCreateSessionRequest,
   readDashboardSubscriptionRequest,
@@ -64,6 +65,7 @@ import {
   readRouteMessageRequest,
   readRunValidationRequest,
   readSessionId,
+  readStartDelegationsRequest,
   readUpdateSessionGoalRequest,
 } from "./readers.ts";
 import {
@@ -78,6 +80,8 @@ import {
   type SessionManagerAgentWorkloadResult,
   type SessionManagerApprovalResult,
   type SessionManagerAskQuestionRequest,
+  type SessionManagerCancelDelegationRunRequest,
+  type SessionManagerCancelDelegationRunResult,
   type SessionManagerCloseSessionRequest,
   type SessionManagerCreateSessionRequest,
   type SessionManagerDashboardEvent,
@@ -110,6 +114,8 @@ import {
   type SessionRecord,
   type SessionManagerSessionDetailResult,
   type SessionManagerSessionSnapshot,
+  type SessionManagerStartDelegationsRequest,
+  type SessionManagerStartDelegationsResult,
   type SessionManagerSubmitArtifactRequest,
   type SessionManagerUpdateSessionGoalRequest,
   type SessionManagerValidationResult,
@@ -119,9 +125,8 @@ import {
 import { createBarrierController } from "./barriers.ts";
 import { createSessionPublisher } from "./publishing.ts";
 import {
-  HUMAN_REPORT_MESSAGE_MAX_CHARS,
+  HUMAN_PROGRESS_MESSAGE_MAX_CHARS,
   enforceReportMessageContract,
-  hasHumanReportForDelegation,
   noteProjectsToHuman,
   reportSourceRefs,
   reportVisibility,
@@ -132,10 +137,14 @@ import {
   sessionManagerAnswerQuestionRequestSchema,
   sessionManagerAskQuestionRequestSchema,
   sessionManagerAskQuestionResultSchema,
+  sessionManagerCancelDelegationRunRequestSchema,
+  sessionManagerCancelDelegationRunResultSchema,
   sessionManagerRecordDecisionRequestSchema,
   sessionManagerReportMessageRequestSchema,
   sessionManagerReportMessageResultSchema,
   sessionManagerSessionSnapshotSchema,
+  sessionManagerStartDelegationsRequestSchema,
+  sessionManagerStartDelegationsResultSchema,
   sessionManagerSubmitArtifactRequestSchema,
 } from "./schemas.ts";
 import { createSessionStore, type ActiveSessionRun } from "./store.ts";
@@ -155,11 +164,13 @@ interface DashboardSubscription {
 export function createSessionManager(options: SessionManagerOptions = {}): SessionManagerEndpoint {
   const uri = options.uri ?? KAIROS_SESSION_MANAGER_URI;
   const node = createNode(uri);
+  const agentEventChannelUri = options.agent_event_channel_uri;
   const dashboardSubscribers = new Map<EndpointUri, DashboardSubscription>();
   let dashboardSequence = 1;
   const {
     sessions,
     activeRunsByMessage,
+    activeRunsByDelegation,
     createSessionForMessage,
     createSession,
     createManualTask,
@@ -188,11 +199,11 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
     hasDelegationForAssignee: (record, assignee) => Boolean(latestDelegationForAssignee(record, assignee)),
     onEventAppended: (record, event) => publishDashboardUpdate(record, event),
   });
-  const { routeHumanMentions, createQuestionDelegation } = createSessionWorkflow({
+  const { routeHumanMentions, createQuestionDelegation, createDirectDelegations } = createSessionWorkflow({
     appendEvent,
     coordinator_uri: options.coordinator_uri,
   });
-  const { updateBarriersForArtifact } = createBarrierController({
+  const { updateBarriersForArtifact, notifyBarrierSatisfied } = createBarrierController({
     sessions,
     appendEvent,
     coordinator_uri: options.coordinator_uri,
@@ -391,6 +402,43 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
       return {
         mime_type: "application/json",
         data: sessionId ? { session_id: sessionId, session_uri: sessionUri(sessionId) } : {},
+      };
+    },
+  );
+
+  node.action<SessionManagerStartDelegationsRequest, SessionManagerStartDelegationsResult>(
+    "start_delegations",
+    {
+      description: "Start direct agent delegations for an existing collaboration session without requiring a Slock message.",
+      accepts: "application/json",
+      returns: "application/json",
+      input: sessionManagerStartDelegationsRequestSchema,
+      output: sessionManagerStartDelegationsResultSchema,
+      input_name: "SessionManagerStartDelegationsRequest",
+      output_name: "SessionManagerStartDelegationsResult",
+    },
+    async ({ input, context }) => {
+      const request = readStartDelegationsRequest(input);
+      const record = requiredSession(request.session_id);
+      const owner = request.owner ?? context.envelope.header.source;
+      const mode = request.mode ?? "parallel";
+      const created = createDirectDelegations(record, { ...request, mode }, owner);
+      if (mode === "parallel") {
+        for (const delegationId of created.delegationIds) {
+          void runDelegation(record.id, delegationId, directDelegationMessage(record, request, delegationId, owner), "delegation", created.barrierId);
+        }
+      } else {
+        void runDelegationsSequentially(record.id, created.delegationIds, request, owner, created.barrierId);
+      }
+      return {
+        mime_type: "application/json",
+        data: {
+          session_id: record.id,
+          task_id: created.taskId,
+          delegation_ids: created.delegationIds,
+          barrier_id: created.barrierId,
+          mode,
+        },
       };
     },
   );
@@ -803,7 +851,7 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
   node.action<SessionManagerReportMessageRequest, SessionManagerReportMessageResult>(
     "report_message",
     {
-      description: `Send a brief IM status pulse, not a report. Agents must call this once with visibility "human" before returning final output for a delegation. For human-visible text, write one natural plain-text sentence under ${HUMAN_REPORT_MESSAGE_MAX_CHARS} characters, aim for 6-14 words, avoid Markdown/headings/bullets/tables/code fences, and put findings, plans, and details in submit_artifact instead.`,
+      description: `Send a brief human-readable IM progress note while work is in flight. Human-visible report_message text must be one natural plain-text line under ${HUMAN_PROGRESS_MESSAGE_MAX_CHARS} characters, without Markdown headings, bullets, numbered lists, tables, or code fences. Do not use report_message for final answers. Put the final answer summary in the agent run result summary, and put detailed Markdown content in the final artifact body or submit_artifact.`,
       accepts: "application/json",
       returns: "application/json",
       input: sessionManagerReportMessageRequestSchema,
@@ -816,7 +864,8 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
       const from = context.envelope.header.source;
       const delegationId = resolveReportDelegationId(record, request.delegation_id, from);
       const visibility = reportVisibility(request);
-      enforceReportMessageContract(request.text, visibility);
+      const purpose = request.purpose ?? "progress";
+      enforceReportMessageContract(request.text, visibility, purpose);
       const at = new Date().toISOString();
       const note: CollaborationNote = {
         id: nextNoteId(record.id),
@@ -824,13 +873,14 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
         from,
         to: request.to,
         visibility,
+        purpose,
         text: request.text,
         delegation_id: delegationId,
         source_refs: reportSourceRefs(record, request, from, delegationId),
         created_at: at,
       };
       const noteEvent = appendEvent(record, { type: "note_posted", note }, at);
-      const projected = request.project !== false && noteProjectsToHuman(note) && !isSynthesisReport(record, delegationId, from)
+      const projected = request.project !== false && noteProjectsToHuman(note) && note.purpose === "progress" && !isSynthesisReport(record, delegationId, from)
         ? await projectNote(record, note, noteEvent.id)
         : undefined;
       return {
@@ -1112,6 +1162,62 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
     }),
   );
 
+  node.action<SessionManagerCancelDelegationRunRequest, SessionManagerCancelDelegationRunResult>(
+    "cancel_delegation_run",
+    {
+      description: "Cancel an active direct delegation run by delegation id without requiring a Slock message id.",
+      accepts: "application/json",
+      returns: "application/json",
+      input: sessionManagerCancelDelegationRunRequestSchema,
+      output: sessionManagerCancelDelegationRunResultSchema,
+      input_name: "SessionManagerCancelDelegationRunRequest",
+      output_name: "SessionManagerCancelDelegationRunResult",
+    },
+    async ({ input }) => {
+      const request = readCancelDelegationRunRequest(input);
+      const record = requiredSession(request.session_id);
+      const run = activeRunsByDelegation.get(request.delegation_id);
+      if (!run || run.session_id !== record.id) {
+        return {
+          mime_type: "application/json",
+          data: {
+            cancelled: false,
+            session_id: record.id,
+            delegation_id: request.delegation_id,
+            reason: "delegation run is not active",
+          },
+        };
+      }
+
+      const reason = request.reason ?? "cancelled";
+      run.cancel_requested = true;
+      run.reason = reason;
+      appendEvent(record, {
+        type: "agent_run_cancelled",
+        session_id: record.id,
+        correlation_id: run.correlation_id,
+        reason,
+      });
+      updateDirectBarrierAfterCancellation(record, run.delegation_id, run.barrier_id);
+      node.cancel(run.agent, {
+        mime_type: "application/json",
+        data: { delegation_id: request.delegation_id, message_id: run.message.id, reason },
+      }, { correlation_id: run.correlation_id });
+      void publishAgentCancelled(run.message.channel, { message_id: run.message.id, agent: run.agent, reason });
+
+      return {
+        mime_type: "application/json",
+        data: {
+          cancelled: true,
+          session_id: record.id,
+          delegation_id: request.delegation_id,
+          agent: run.agent,
+          reason,
+        },
+      };
+    },
+  );
+
   node.action<SlockCancelAgentRunRequest, SlockCancelAgentRunResult>(
     "cancel_agent_run",
     {
@@ -1370,7 +1476,7 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
     const origin = originMessageRef(record.state);
     return {
       id: origin?.message_id ?? `revision_${artifact.id}`,
-      channel: origin?.channel ?? record.uri,
+      channel: sessionAgentEventChannel(record),
       sender: review.reviewer,
       text: revisionInstruction ?? review.note ?? `Revise artifact ${artifact.id}`,
       mentions: [artifact.author],
@@ -1516,7 +1622,7 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
     const origin = originMessageRef(record.state);
     return {
       id: origin?.message_id ?? validation.id,
-      channel: origin?.channel ?? record.uri,
+      channel: sessionAgentEventChannel(record),
       sender: validation.requester,
       text: validation.summary ?? `Validate ${validation.artifact_id ?? validation.task_id ?? record.id}`,
       mentions: [validator],
@@ -1535,11 +1641,107 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
     return Boolean(delegation && (delegation.role === "synthesis" || delegation.id.startsWith("delegation_synthesis_")));
   }
 
+  async function runDelegationsSequentially(
+    sessionId: string,
+    delegationIds: string[],
+    request: SessionManagerStartDelegationsRequest,
+    owner: EndpointUri,
+    barrierId: string | undefined,
+  ): Promise<void> {
+    for (const delegationId of delegationIds) {
+      const record = sessions.get(sessionId);
+      if (!record) {
+        return;
+      }
+      await runDelegation(record.id, delegationId, directDelegationMessage(record, request, delegationId, owner), "delegation", barrierId);
+    }
+  }
+
+  function directDelegationMessage(
+    record: SessionRecord,
+    request: SessionManagerStartDelegationsRequest,
+    delegationId: string,
+    owner: EndpointUri,
+  ): SlockMessage {
+    const delegation = record.state.delegations[delegationId];
+    const origin = originMessageRef(record.state);
+    const createdAt = new Date().toISOString();
+    return {
+      id: `message_direct_${slug(record.id)}_${slug(delegationId)}`,
+      channel: sessionAgentEventChannel(record),
+      sender: owner,
+      text: delegation?.instruction ?? request.instruction,
+      mentions: delegation ? [delegation.assignee] : [],
+      thread_id: origin?.message_id ?? null,
+      reply_to_id: origin?.message_id ?? null,
+      kind: owner.startsWith("human://") ? "human" : owner.startsWith("agent://") ? "agent" : "system",
+      created_at: createdAt,
+    };
+  }
+
+  function sessionAgentEventChannel(record: SessionRecord): EndpointUri {
+    return originMessageRef(record.state)?.channel ?? agentEventChannelUri ?? record.uri;
+  }
+
+  function updateDirectBarrierAfterCancellation(record: SessionRecord, delegationId: string, barrierId: string | undefined): void {
+    const delegation = record.state.delegations[delegationId];
+    if (!delegation?.id.startsWith("delegation_direct_") || !barrierId) {
+      return;
+    }
+
+    const at = new Date().toISOString();
+    const barrier = record.state.barriers[barrierId];
+    if (!barrier?.id.startsWith("barrier_direct_") || barrier.status !== "open" || barrier.task_id !== delegation.task_id) {
+      return;
+    }
+    if (!barrier.expected_from.includes(delegation.assignee)) {
+      return;
+    }
+
+    const expectedFrom = barrier.expected_from.filter((assignee) => assignee !== delegation.assignee);
+    const replyCount = Object.keys(barrier.replies).length;
+    const status = expectedFrom.length === 0 && replyCount === 0 ? "cancelled" : "open";
+
+    appendEvent(record, {
+      type: "barrier_updated",
+      session_id: record.id,
+      barrier_id: barrier.id,
+      patch: { expected_from: expectedFrom, status, updated_at: at },
+    }, at);
+
+    const updated = record.state.barriers[barrier.id];
+    if (updated?.status === "open" && barrierIsSatisfied(updated)) {
+      appendEvent(record, { type: "barrier_satisfied", session_id: record.id, barrier_id: updated.id }, at);
+      void notifyBarrierSatisfied(record.id, updated.id);
+      return;
+    }
+
+    const directDelegationsForTask = Object.values(record.state.delegations).filter((candidate) => {
+      return candidate.id.startsWith("delegation_direct_") && candidate.task_id === barrier.task_id;
+    });
+    const noLiveDirectWork = directDelegationsForTask.length > 0
+      && directDelegationsForTask.every((candidate) => candidate.status !== "pending" && candidate.status !== "running" && candidate.status !== "submitted");
+    if (updated?.status === "cancelled" && barrier.task_id && noLiveDirectWork) {
+      appendEvent(record, {
+        type: "task_updated",
+        session_id: record.id,
+        task_id: barrier.task_id,
+        patch: { status: "cancelled", updated_at: at },
+      }, at);
+    }
+  }
+
+  function projectionSourceRefForRun(record: SessionRecord, message: SlockMessage): SourceRef {
+    const origin = originMessageRef(record.state);
+    return message.id.startsWith("message_direct_") && origin ? origin : messageSourceRef(message);
+  }
+
   async function runDelegation(
     sessionId: string,
     delegationId: string,
     message: SlockMessage,
     purpose: RenderForAgentRequest["purpose"] = "delegation",
+    barrierId?: string,
   ): Promise<void> {
     const record = sessions.get(sessionId);
     const delegation = record?.state.delegations[delegationId];
@@ -1576,6 +1778,7 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
       message,
       correlation_id: correlationId,
       started_at: startedAt,
+      barrier_id: barrierId,
     };
     rememberActiveRun(run);
     await publishAgentRun(message.channel, "publish_agent_run_started", {
@@ -1702,16 +1905,13 @@ export function createSessionManager(options: SessionManagerOptions = {}): Sessi
           patch: { status: "completed" },
         });
       }
-      const shouldProjectFinalArtifact = purpose === "synthesis" || !hasHumanReportForDelegation(record, delegation.id);
-      const finalMessage = shouldProjectFinalArtifact
-        ? await projectArtifact(
-          record,
-          artifact,
-          artifactEvent.id,
-          messageSourceRef(message),
-          purpose === "synthesis" ? "final_report" : "artifact",
-        )
-        : undefined;
+      const finalMessage = await projectArtifact(
+        record,
+        artifact,
+        artifactEvent.id,
+        projectionSourceRefForRun(record, message),
+        purpose === "synthesis" ? "final_report" : "artifact",
+      );
       await publishAgentRun(message.channel, "publish_agent_run_finished", {
         run_id: correlationId,
         message_id: message.id,

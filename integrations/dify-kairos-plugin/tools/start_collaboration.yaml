@@ -1,0 +1,63 @@
+identity:
+  name: start_collaboration
+  author: tomiya
+  label:
+    en_US: Start Kairos collaboration
+    zh_Hans: 启动 Kairos 协作
+description:
+  human:
+    en_US: Start a Kairos collaboration session from a Dify message and selected agents.
+    zh_Hans: 从 Dify 消息和指定 agents 启动 Kairos 协作会话。
+  llm: Start a local Kairos collaboration session and return a concise launch acknowledgement.
+parameters:
+  - name: message
+    type: string
+    required: true
+    label:
+      en_US: Message
+      zh_Hans: 消息
+    human_description:
+      en_US: User request for Kairos agents.
+      zh_Hans: 给 Kairos agents 的用户请求。
+    form: llm
+  - name: agents
+    type: string
+    required: false
+    label:
+      en_US: Agents
+      zh_Hans: Agents
+    human_description:
+      en_US: Comma-separated Kairos agent endpoint URIs.
+      zh_Hans: 逗号分隔的 Kairos agent endpoint URI。
+    form: llm
+  - name: title
+    type: string
+    required: false
+    label:
+      en_US: Title
+      zh_Hans: 标题
+    form: llm
+  - name: expected_output
+    type: string
+    required: false
+    label:
+      en_US: Expected output
+      zh_Hans: 预期产物
+    form: llm
+  - name: conversation_id
+    type: string
+    required: false
+    label:
+      en_US: Dify conversation id
+      zh_Hans: Dify conversation id
+    form: llm
+  - name: message_id
+    type: string
+    required: false
+    label:
+      en_US: Dify message id
+      zh_Hans: Dify message id
+    form: llm
+extra:
+  python:
+    source: tools/start_collaboration.py

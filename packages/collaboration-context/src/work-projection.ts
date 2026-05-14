@@ -5,8 +5,13 @@ import type {
   AgentWorkSummary,
   Artifact,
   ArtifactSummary,
+  BuildBoardColumn,
+  BuildBoardColumnKey,
+  BuildBoardItem,
+  BuildBoardProjection,
   CollaborationState,
   Delegation,
+  ApprovalRequest,
   ReviewQueueItem,
   SessionDetailProjection,
   SessionWorkProjection,
@@ -35,6 +40,7 @@ export function renderSessionWorkProjection(state: CollaborationState): SessionW
   const phase = workPhase(state, primaryTask, blockers);
   const latestArtifact = latestCurrentArtifact([...artifacts, ...Object.values(state.artifacts).filter((artifact) => artifact.status === "revision_requested")]);
   const latestArtifactSummary = latestArtifact ? artifactSummary(latestArtifact, 320) : undefined;
+  const buildBoard = buildBoardProjection(state);
 
   return {
     session_id: session.id,
@@ -50,6 +56,7 @@ export function renderSessionWorkProjection(state: CollaborationState): SessionW
     current_work: currentWorkText(state),
     latest_report: latestArtifactSummary?.text,
     latest_artifact: latestArtifactSummary,
+    ...(buildBoard ? { build_board: buildBoard } : {}),
     blockers,
     actions: workActions(session.origin, latestArtifact, blockers),
     origin: session.origin,
@@ -193,6 +200,213 @@ export function renderAgentWorkload(states: CollaborationState[]): AgentWorkload
     }
   }
   return [...byAgent.values()].sort((a, b) => a.agent.localeCompare(b.agent));
+}
+
+const buildColumnLabels: Record<BuildBoardColumnKey, string> = {
+  todo: "To do",
+  building: "Building",
+  review: "Review",
+  validate: "Validate",
+  done: "Done",
+};
+
+const buildColumnOrder: BuildBoardColumnKey[] = ["todo", "building", "review", "validate", "done"];
+
+function buildBoardProjection(state: CollaborationState): BuildBoardProjection | undefined {
+  const writeOperations = writeOperationSummaries(state);
+  const buildIntent = hasBuildIntent(state) || writeOperations.length > 0;
+  if (!buildIntent) return undefined;
+
+  const columns = buildColumnOrder.map((key): BuildBoardColumn => ({ key, label: buildColumnLabels[key], items: [] }));
+  const byColumn = new Map(columns.map((column) => [column.key, column.items]));
+  const delegations = Object.values(state.delegations).filter((delegation) => !isSynthesisDelegation(delegation));
+  const tasks = Object.values(state.tasks);
+
+  for (const task of tasks) {
+    const taskDelegations = delegations.filter((delegation) => delegation.task_id === task.id);
+    if (task.status === "completed" || task.status === "cancelled") {
+      pushBuildItem(byColumn, "done", taskBuildItem(task));
+    } else if (taskDelegations.length === 0) {
+      pushBuildItem(byColumn, "todo", taskBuildItem(task));
+    }
+  }
+
+  for (const delegation of delegations) {
+    if (delegation.status === "pending" || delegation.status === "running" || delegation.status === "failed" || delegation.status === "cancelled") {
+      pushBuildItem(byColumn, "building", delegationBuildItem(delegation));
+    } else if (delegation.status === "submitted" && !delegation.submitted_artifact_id) {
+      pushBuildItem(byColumn, "review", delegationBuildItem(delegation));
+    }
+  }
+
+  for (const approval of Object.values(state.approvals)) {
+    if (approval.status === "pending" && isWriteAction(approval.action, approval.tool_endpoint)) {
+      pushBuildItem(byColumn, "building", approvalBuildItem(approval));
+    }
+  }
+
+  for (const artifact of Object.values(state.artifacts)) {
+    if (artifact.status === "submitted" || artifact.status === "revision_requested" || artifact.status === "rejected") {
+      pushBuildItem(byColumn, "review", artifactBuildItem(artifact));
+    } else if (artifact.status === "accepted" || artifact.status === "superseded") {
+      pushBuildItem(byColumn, "done", artifactBuildItem(artifact));
+    }
+  }
+
+  for (const validation of Object.values(state.validations)) {
+    if (validation.status === "requested" || validation.status === "running" || validation.status === "failed") {
+      pushBuildItem(byColumn, "validate", {
+        id: validation.id,
+        kind: "validation",
+        title: validation.summary ?? `Validation ${validation.status}`,
+        status: validation.status,
+        owner: validation.requester,
+        agent: validation.validator,
+        summary: validation.artifact_id ?? validation.task_id,
+        source_refs: validation.source_refs,
+        trace_refs: validation.trace_refs ?? [],
+      });
+    } else if (validation.status === "passed") {
+      pushBuildItem(byColumn, "done", {
+        id: validation.id,
+        kind: "validation",
+        title: validation.summary ?? "Validation passed",
+        status: validation.status,
+        owner: validation.requester,
+        agent: validation.validator,
+        source_refs: validation.source_refs,
+        trace_refs: validation.trace_refs ?? [],
+      });
+    }
+  }
+
+  const active = state.session?.status === "open" && columns.some((column) => column.key !== "done" && column.items.length > 0);
+  return {
+    active,
+    reason: writeOperations.length > 0 ? "Write operations detected." : "Build-oriented task or delegation detected.",
+    write_operations: writeOperations,
+    columns,
+  };
+}
+
+function pushBuildItem(columns: Map<BuildBoardColumnKey, BuildBoardItem[]>, column: BuildBoardColumnKey, item: BuildBoardItem): void {
+  columns.get(column)?.push(item);
+}
+
+function taskBuildItem(task: Task): BuildBoardItem {
+  return {
+    id: task.id,
+    kind: "task",
+    title: task.title,
+    status: task.status,
+    owner: task.owner,
+    summary: task.acceptance_criteria?.join(" · "),
+    source_refs: task.source_refs,
+    trace_refs: task.trace_refs ?? [],
+  };
+}
+
+function delegationBuildItem(delegation: Delegation): BuildBoardItem {
+  return {
+    id: delegation.id,
+    kind: "delegation",
+    title: delegation.role_label ?? delegation.role ?? `Work for ${labelFromUri(delegation.assignee)}`,
+    status: delegation.status,
+    owner: delegation.assignee,
+    agent: delegation.assignee,
+    summary: clip(delegation.instruction, 220),
+    source_refs: delegation.source_refs,
+    trace_refs: delegation.trace_refs ?? [],
+  };
+}
+
+function approvalBuildItem(approval: ApprovalRequest): BuildBoardItem {
+  return {
+    id: approval.id,
+    kind: "approval",
+    title: `${labelFromUri(approval.tool_endpoint)} ${approval.action}`,
+    status: approval.status,
+    owner: "human://user/local",
+    agent: approval.requester,
+    summary: approval.payload_summary,
+    source_refs: approval.source_refs,
+    trace_refs: approval.trace_refs ?? [],
+  };
+}
+
+function artifactBuildItem(artifact: Artifact): BuildBoardItem {
+  return {
+    id: artifact.id,
+    kind: "artifact",
+    title: artifact.title ?? artifact.kind.replace(/_/g, " "),
+    status: artifact.status,
+    owner: artifact.author,
+    agent: artifact.author,
+    summary: artifactText(artifact, 220),
+    source_refs: artifact.source_refs,
+    trace_refs: artifact.trace_refs ?? [],
+  };
+}
+
+function writeOperationSummaries(state: CollaborationState): ToolCallSummary[] {
+  const operations: ToolCallSummary[] = [];
+  const seen = new Set<string>();
+  const push = (operation: ToolCallSummary): void => {
+    const key = `${operation.endpoint}:${operation.action}:${operation.payload_summary ?? ""}:${operation.status ?? ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    operations.push(operation);
+  };
+
+  for (const approval of Object.values(state.approvals)) {
+    if (!isWriteAction(approval.action, approval.tool_endpoint)) continue;
+    push({
+      endpoint: approval.tool_endpoint,
+      action: approval.action,
+      payload_summary: approval.payload_summary,
+      status: approvalToolStatus(approval.status),
+      trace_ref: approval.trace_refs?.[0],
+    });
+  }
+
+  for (const trace of state.trace_refs) {
+    if (!trace.endpoint || !trace.action || !isWriteAction(trace.action, trace.endpoint)) continue;
+    push({
+      endpoint: trace.endpoint,
+      action: trace.action,
+      payload_summary: trace.label,
+      status: trace.severity === "error" ? "failed" : undefined,
+      trace_ref: trace,
+    });
+  }
+
+  return operations.slice(-6);
+}
+
+function approvalToolStatus(status: ApprovalRequest["status"]): ToolCallSummary["status"] {
+  if (status === "approved") return "completed";
+  if (status === "rejected" || status === "expired") return "failed";
+  return status;
+}
+
+function hasBuildIntent(state: CollaborationState): boolean {
+  return Object.values(state.artifacts).some((artifact) => artifact.kind === "patch")
+    || Object.values(state.tasks).some((task) => buildTextPattern.test([task.title, ...(task.acceptance_criteria ?? [])].join(" ")))
+    || Object.values(state.delegations).some((delegation) => buildTextPattern.test([
+      delegation.role,
+      delegation.role_label,
+      delegation.instruction,
+      delegation.expected_output,
+    ].filter(Boolean).join(" ")));
+}
+
+const buildTextPattern = /\b(build|implement|fix|refactor|edit|write|change|add|remove|create|update|migrate|patch|ship|test)\b|实现|修复|改造|重构|编辑|写入|修改|新增|删除|迁移|补齐|落地|测试/iu;
+
+function isWriteAction(action: string, endpoint?: EndpointUri): boolean {
+  const normalized = action.toLowerCase();
+  if (normalized === "write" || normalized === "edit" || normalized === "exec") return true;
+  if (normalized.includes("write") || normalized.includes("edit") || normalized.includes("patch")) return true;
+  return Boolean(endpoint?.includes("shell") && normalized.includes("exec"));
 }
 
 function workPhase(state: CollaborationState, task: Task | undefined, blockers: WorkBlocker[]): PhaseResult {

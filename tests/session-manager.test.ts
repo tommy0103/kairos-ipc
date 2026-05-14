@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { createAgentAdapter, type AgentRuntime } from "../packages/agent-adapter/src/index.ts";
@@ -84,7 +84,9 @@ test("session manager owns multi-agent Slock routing and projects artifacts back
     const finalReports = projected.filter((event) => event.message?.projection?.presentation === "final_report");
     assert.deepEqual(agentProjected.map((event) => event.message?.sender).sort(), ["agent://local/alice", "agent://local/cindy"]);
     assert.equal(artifactProjections.length, 2);
-    assert.ok(artifactProjections.every((event) => event.message?.text === "Artifact ready."));
+    assert.ok(artifactProjections.every((event) => !event.message?.text.startsWith("Artifact ready.")));
+    assert.ok(artifactProjections.some((event) => event.message?.text.includes("alice completed")));
+    assert.ok(artifactProjections.some((event) => event.message?.text.includes("cindy completed")));
     assert.ok(artifactProjections.every((event) => event.message?.projection?.session_id === record.id));
     assert.ok(artifactProjections.every((event) => event.message?.projection?.artifact_id));
     assert.equal(finalReports.length, 1);
@@ -94,10 +96,10 @@ test("session manager owns multi-agent Slock routing and projects artifacts back
     assert.equal(finalReports[0]?.message?.projection?.session_id, record.id);
     assert.ok(finalReports[0]?.message?.projection?.artifact_id);
     assert.ok(projected.every((event) => event.message?.thread_id === rootId));
-    assert.ok(projected.some((event) => event.message?.text === "Final synthesis ready."));
-    assert.ok(!projected.some((event) => event.message?.text.includes("alice completed")));
-    assert.ok(!projected.some((event) => event.message?.text.includes("cindy completed")));
-    assert.ok(!projected.some((event) => event.message?.text.includes("coordinator saw workers")));
+    assert.ok(projected.some((event) => event.message?.text.includes("coordinator saw workers")));
+    assert.ok(projected.filter((event) => event.message?.text.includes("alice completed")).every((event) => event.message?.projection?.presentation === "artifact"));
+    assert.ok(projected.filter((event) => event.message?.text.includes("cindy completed")).every((event) => event.message?.projection?.presentation === "artifact"));
+    assert.ok(projected.filter((event) => event.message?.text.includes("coordinator saw workers")).every((event) => event.message?.projection?.presentation === "final_report"));
     assert.ok(!projected.some((event) => event.message?.text === "Drafting final synthesis."));
 
     const coordinatorRun = capturedRuns.find((run) => run.purpose === "synthesis");
@@ -286,7 +288,7 @@ test("session manager skips coordinator synthesis for independent parallel deleg
   }
 });
 
-test("session manager lets agents report short messages without duplicating final artifact projection", async () => {
+test("session manager projects final result summaries while storing artifact bodies", async () => {
   const ipc = createContext();
   const human = createNode("human://user/local");
   const sessionManager = createSessionManager({ uri: "app://kairos/session-manager" });
@@ -323,19 +325,132 @@ test("session manager lets agents report short messages without duplicating fina
     assert.ok(record);
     assert.equal(Object.keys(record.state.artifacts).length, 1);
     assert.equal(Object.keys(record.state.notes).length, 2);
-    assert.equal(channel.messages.length, 2);
+    assert.equal(channel.messages.length, 3);
     assert.ok(channel.messages.some((message) => message.text === "Checking implementation path."));
+    assert.ok(channel.messages.some((message) => message.text.includes("Finding: Implementation path is ready enough to review.")));
+    assert.ok(channel.messages.some((message) => message.text.includes("Risk: File boundary still needs validation before the session can be treated as low-risk.")));
     assert.ok(!channel.messages.some((message) => message.text.includes("Detailed artifact for review")));
-    assert.equal(events.filter((event) => event.type === "message_created" && event.message?.kind === "agent").length, 1);
+    assert.equal(events.filter((event) => event.type === "message_created" && event.message?.kind === "agent").length, 2);
 
     const runFinished = events.find((event) => event.type === "agent_run_finished" && event.run?.state === "completed");
-    assert.equal(runFinished?.run?.final_message_id, undefined);
+    assert.ok(runFinished?.run?.final_message_id);
+
+    const artifact = Object.values(record.state.artifacts)[0];
+    assert.deepEqual(artifact?.content, {
+      summary: "Finding: Implementation path is ready enough to review. The first pass found a coherent route through the session manager and channel projection code.\n\nRisk: File boundary still needs validation before the session can be treated as low-risk. The artifact calls out which ownership lines Cindy should verify next.\n\nNext: Review the artifact for the detailed checklist, then decide whether the boundary needs another focused pass.",
+      final_text: "Detailed artifact for review.",
+    });
 
     const rendered = await human.call("app://kairos/session-manager", "render_context", {
       mime_type: "application/json",
       data: { session_id: record.id, audience: "agent://local/cindy", purpose: "review" },
     });
     assert.ok((rendered.data as { text: string }).text.includes("Cindy should validate the file boundary."));
+  } finally {
+    await human.close().catch(() => undefined);
+    await sessionManager.node.close().catch(() => undefined);
+    await channel.node.close().catch(() => undefined);
+    await alice.node.close().catch(() => undefined);
+  }
+});
+
+test("progress reports do not suppress final artifact projections", async () => {
+  const ipc = createContext();
+  const human = createNode("human://user/local");
+  const sessionManager = createSessionManager({ uri: "app://kairos/session-manager" });
+  const channel = createSlockChannel({
+    uri: "app://slock/channel/general",
+    session_manager_uri: "app://kairos/session-manager",
+    mention_aliases: { alice: "agent://local/alice" },
+  });
+  const capturedRuns: SlockAgentRun[] = [];
+  const alice = createAgentAdapter({ uri: "agent://local/alice", runtime: progressOnlyRuntime(capturedRuns) });
+  const events: SlockChannelEvent[] = [];
+
+  human.onEmit("*", (payload) => {
+    if (payload.mime_type === SLOCK_CHANNEL_EVENT_MIME) {
+      events.push(payload.data as SlockChannelEvent);
+    }
+  });
+
+  try {
+    await human.connect(ipc.createTransport("human"));
+    await sessionManager.node.connect(ipc.createTransport("session-manager"));
+    await channel.node.connect(ipc.createTransport("channel"));
+    await alice.node.connect(ipc.createTransport("alice"));
+
+    await human.call("app://slock/channel/general", "subscribe", { mime_type: "application/json", data: {} });
+    await human.call("app://slock/channel/general", "post_message", {
+      mime_type: SLOCK_MESSAGE_MIME,
+      data: { text: "@alice inspect the implementation path", thread_id: null },
+    });
+
+    await waitFor(() => events.some((event) => event.type === "message_created" && event.message?.projection?.presentation === "artifact"));
+
+    const record = [...sessionManager.sessions.values()][0];
+    assert.ok(record);
+    assert.equal(capturedRuns.length, 1);
+    assert.ok(Object.values(record.state.notes).some((note) => note.purpose === "progress"));
+    assert.ok(!Object.values(record.state.notes).some((note) => note.purpose === "final_summary"));
+    assert.ok(channel.messages.some((message) => message.text === "Checking implementation path."));
+    assert.ok(channel.messages.some((message) => message.text === "Detailed artifact for review."));
+  } finally {
+    await human.close().catch(() => undefined);
+    await sessionManager.node.close().catch(() => undefined);
+    await channel.node.close().catch(() => undefined);
+    await alice.node.close().catch(() => undefined);
+  }
+});
+
+test("session manager mode suppresses legacy stream text and thread auto-mentions", async () => {
+  const ipc = createContext();
+  const human = createNode("human://user/local");
+  const sessionManager = createSessionManager({ uri: "app://kairos/session-manager" });
+  const channel = createSlockChannel({
+    uri: "app://slock/channel/general",
+    session_manager_uri: "app://kairos/session-manager",
+    mention_aliases: { alice: "agent://local/alice" },
+  });
+  const capturedRuns: SlockAgentRun[] = [];
+  const alice = createAgentAdapter({ uri: "agent://local/alice", runtime: legacyStreamingRuntime(capturedRuns) });
+  const events: SlockChannelEvent[] = [];
+
+  human.onEmit("*", (payload) => {
+    if (payload.mime_type === SLOCK_CHANNEL_EVENT_MIME) {
+      events.push(payload.data as SlockChannelEvent);
+    }
+  });
+
+  try {
+    await human.connect(ipc.createTransport("human"));
+    await sessionManager.node.connect(ipc.createTransport("session-manager"));
+    await channel.node.connect(ipc.createTransport("channel"));
+    await alice.node.connect(ipc.createTransport("alice"));
+
+    await human.call("app://slock/channel/general", "subscribe", { mime_type: "application/json", data: {} });
+    const posted = await human.call("app://slock/channel/general", "post_message", {
+      mime_type: SLOCK_MESSAGE_MIME,
+      data: { text: "@alice inspect the architecture", thread_id: null },
+    });
+    const rootId = (posted.data as { id: string }).id;
+
+    await waitFor(() => events.some((event) => event.type === "message_created" && event.message?.projection?.presentation === "artifact"));
+    assert.equal(capturedRuns.length, 1);
+    assert.equal(events.some((event) => event.type === "message_delta" && event.delta?.kind !== "status"), false);
+    assert.equal(channel.messages.some((message) => message.text.includes("Legacy streamed body")), false);
+
+    const followup = await human.call("app://slock/channel/general", "post_message", {
+      mime_type: SLOCK_MESSAGE_MIME,
+      data: { text: "noted, keep this attached to the same session", thread_id: rootId },
+    });
+    const followupMessage = followup.data as { id: string; mentions: string[] };
+    assert.deepEqual(followupMessage.mentions, []);
+
+    const record = [...sessionManager.sessions.values()][0];
+    assert.ok(record);
+    await waitFor(() => record.state.source_refs.some((ref) => ref.kind === "channel_message" && ref.message_id === followupMessage.id));
+    assert.equal(Object.keys(record.state.delegations).length, 1);
+    assert.equal(capturedRuns.length, 1);
   } finally {
     await human.close().catch(() => undefined);
     await sessionManager.node.close().catch(() => undefined);
@@ -549,10 +664,12 @@ test("session manager exposes production workflow actions and dashboard projecti
       mime_type: "application/json",
       data: { session_id: record.id },
     });
-    const detailData = detail.data as { session: { constraints: unknown[]; approvals: unknown[]; validations: unknown[] } };
+    const detailData = detail.data as { session: { session: { build_board?: { columns: unknown[]; write_operations: unknown[] } }; constraints: unknown[]; approvals: unknown[]; validations: unknown[] } };
     assert.equal(detailData.session.constraints.length, 1);
     assert.equal(detailData.session.approvals.length, 1);
     assert.equal(detailData.session.validations.length, 1);
+    assert.equal(detailData.session.session.build_board?.columns.length, 5);
+    assert.equal(detailData.session.session.build_board?.write_operations.length, 1);
 
     const queueWithValidation = await human.call("app://kairos/session-manager", "list_review_queue", {
       mime_type: "application/json",
@@ -583,6 +700,30 @@ test("session manager exposes production workflow actions and dashboard projecti
       }),
       /under 80 characters/,
     );
+
+    await assert.rejects(
+      human.call("app://kairos/session-manager", "report_message", {
+        mime_type: "application/json",
+        data: {
+          session_id: record.id,
+          visibility: "human",
+          text: "Done.\nNext.",
+        },
+      }),
+      /one brief IM status line/,
+    );
+
+    const legacySummary = await human.call("app://kairos/session-manager", "report_message", {
+      mime_type: "application/json",
+      data: {
+        session_id: record.id,
+        visibility: "human",
+        purpose: "final_summary",
+        text: "Finding: Legacy callers can still record this.\nNext: Final result summaries own IM projection.",
+      },
+    });
+    assert.equal((legacySummary.data as { note: { purpose: string }; projected_message_id?: string }).note.purpose, "final_summary");
+    assert.equal((legacySummary.data as { projected_message_id?: string }).projected_message_id, undefined);
   } finally {
     await human.close().catch(() => undefined);
     await sessionManager.node.close().catch(() => undefined);
@@ -850,6 +991,567 @@ test("explicit routing can start or target sessions without channel heuristics",
   }
 });
 
+test("direct delegation request creates an explicit Dify-sourced session and public run shape", async () => {
+  const ipc = createContext();
+  const human = createNode("human://user/local");
+  const sessionManager = createSessionManager({ uri: "app://kairos/session-manager" });
+
+  try {
+    await human.connect(ipc.createTransport("human-direct-contract"));
+    await sessionManager.node.connect(ipc.createTransport("session-direct-contract"));
+
+    const created = await human.call("app://kairos/session-manager", "create_session", {
+      mime_type: "application/json",
+      data: {
+        title: "Review repository architecture",
+        objective: "Find architecture and code-quality risks.",
+        acceptance_criteria: ["Alice submits architecture artifact", "Cindy submits code-quality artifact"],
+        source_ref: {
+          kind: "external",
+          uri: "dify://app/kairos/conversation/conv_1/message/msg_1",
+          label: "Dify user message",
+        },
+      },
+    });
+
+    const sessionId = (created.data as { session_id: string }).session_id;
+    const record = sessionManager.getSession(sessionId);
+    assert.ok(record);
+    assert.equal(record.state.session?.origin.kind, "external");
+    assert.equal(record.state.session?.origin.uri, "dify://app/kairos/conversation/conv_1/message/msg_1");
+
+    const result = await human.call("app://kairos/session-manager", "start_delegations", {
+      mime_type: "application/json",
+      data: {
+        session_id: sessionId,
+        task_title: "Review repository architecture",
+        owner: "human://user/local",
+        instruction: "Review the repository and submit a concise artifact.",
+        expected_output: "Markdown artifact with findings and risks.",
+        mode: "parallel",
+        synthesis_requested: false,
+        delegations: [
+          { assignee: "agent://local/alice", role: "architecture", role_label: "Architecture", instruction: "Review architecture boundaries." },
+          { assignee: "agent://local/cindy", role: "code_quality", role_label: "Code quality", instruction: "Review maintainability and tests." },
+        ],
+        source_refs: [{ kind: "external", uri: "dify://app/kairos/conversation/conv_1/message/msg_1", label: "Dify user message" }],
+      },
+    });
+
+    const data = result.data as { session_id: string; task_id: string; delegation_ids: string[]; barrier_id?: string; mode: string };
+    assert.equal(data.session_id, sessionId);
+    assert.equal(data.mode, "parallel");
+    assert.equal(data.delegation_ids.length, 2);
+    assert.ok(data.task_id);
+    assert.ok(data.barrier_id);
+  } finally {
+    await human.close().catch(() => undefined);
+    await sessionManager.node.close().catch(() => undefined);
+  }
+});
+
+test("direct delegation runtime starts agents, records artifacts, and cancels by delegation id", async () => {
+  const ipc = createContext();
+  const human = createNode("human://user/local");
+  const sessionManager = createSessionManager({ uri: "app://kairos/session-manager" });
+  const capturedRuns: SlockAgentRun[] = [];
+  const alice = createAgentAdapter({ uri: "agent://local/alice", runtime: recordingRuntime("alice", capturedRuns) });
+  const cindy = createAgentAdapter({ uri: "agent://local/cindy", runtime: recordingRuntime("cindy", capturedRuns) });
+  const slowRuns: SlockAgentRun[] = [];
+  const slow = createAgentAdapter({ uri: "agent://local/slow", runtime: cancellableRuntime(slowRuns) });
+
+  try {
+    await human.connect(ipc.createTransport("human-direct-runtime"));
+    await sessionManager.node.connect(ipc.createTransport("session-direct-runtime"));
+    await alice.node.connect(ipc.createTransport("alice-direct-runtime"));
+    await cindy.node.connect(ipc.createTransport("cindy-direct-runtime"));
+    await slow.node.connect(ipc.createTransport("slow-direct-runtime"));
+
+    const created = await human.call("app://kairos/session-manager", "create_session", {
+      mime_type: "application/json",
+      data: {
+        session_id: "session_dify_direct_runtime",
+        title: "Direct Dify bridge run",
+        source_ref: { kind: "external", uri: "dify://app/kairos/conversation/conv_2/message/msg_2", label: "Dify user message" },
+      },
+    });
+    const sessionId = (created.data as { session_id: string }).session_id;
+    const record = sessionManager.getSession(sessionId);
+    assert.ok(record);
+
+    const started = await human.call("app://kairos/session-manager", "start_delegations", {
+      mime_type: "application/json",
+      data: {
+        session_id: sessionId,
+        task_title: "Review direct bridge behavior",
+        instruction: "Inspect the direct delegation context and submit findings.",
+        expected_output: "A concise summary artifact.",
+        mode: "parallel",
+        synthesis_requested: false,
+        source_refs: [{ kind: "external", uri: "dify://app/kairos/conversation/conv_2/message/msg_2", label: "Dify user message" }],
+        delegations: [
+          { assignee: "agent://local/alice", role: "architecture", instruction: "Check architecture handoff." },
+          { assignee: "agent://local/cindy", role: "quality", instruction: "Check quality risks." },
+        ],
+      },
+    });
+    const directRun = started.data as { delegation_ids: string[]; barrier_id: string };
+
+    await waitFor(() => capturedRuns.length === 2);
+    await waitFor(() => record.state.barriers[directRun.barrier_id]?.status === "satisfied");
+    assert.equal(Object.keys(record.state.artifacts).length, 2);
+    assert.deepEqual(capturedRuns.map((run) => run.session_id), [sessionId, sessionId]);
+    assert.deepEqual(capturedRuns.map((run) => run.delegation_id).sort(), [...directRun.delegation_ids].sort());
+    assert.ok(capturedRuns.every((run) => run.context_text?.includes("Inspect the direct delegation context")));
+    assert.ok(capturedRuns.every((run) => run.source_refs?.some((ref) => ref.kind === "external" && ref.uri === "dify://app/kairos/conversation/conv_2/message/msg_2")));
+
+    const cancelStarted = await human.call("app://kairos/session-manager", "start_delegations", {
+      mime_type: "application/json",
+      data: {
+        session_id: sessionId,
+        task_title: "Cancellable direct run",
+        instruction: "Stay active until cancelled.",
+        mode: "parallel",
+        delegations: [{ assignee: "agent://local/slow", instruction: "Wait for cancellation." }],
+      },
+    });
+    const cancelRun = cancelStarted.data as { task_id: string; delegation_ids: string[]; barrier_id: string };
+    const cancelDelegationId = cancelRun.delegation_ids[0];
+    assert.ok(cancelDelegationId);
+    await waitFor(() => slowRuns.length === 1 && record.state.delegations[cancelDelegationId]?.status === "running");
+
+    const cancelled = await human.call("app://kairos/session-manager", "cancel_delegation_run", {
+      mime_type: "application/json",
+      data: {
+        session_id: sessionId,
+        delegation_id: cancelDelegationId,
+        reason: "Dify user stopped the run",
+      },
+    });
+    assert.deepEqual(cancelled.data, {
+      cancelled: true,
+      session_id: sessionId,
+      delegation_id: cancelDelegationId,
+      agent: "agent://local/slow",
+      reason: "Dify user stopped the run",
+    });
+    await waitFor(() => record.state.delegations[cancelDelegationId]?.status === "cancelled" && Object.keys(record.state.active_runs).length === 0);
+    assert.equal(record.state.barriers[cancelRun.barrier_id]?.status, "cancelled");
+    assert.equal(record.state.tasks[cancelRun.task_id]?.status, "cancelled");
+    assert.ok(record.events.some((event) => event.type === "agent_run_cancelled" && event.reason === "Dify user stopped the run"));
+  } finally {
+    await human.close().catch(() => undefined);
+    await sessionManager.node.close().catch(() => undefined);
+    await alice.node.close().catch(() => undefined);
+    await cindy.node.close().catch(() => undefined);
+    await slow.node.close().catch(() => undefined);
+  }
+});
+
+test("direct delegation rejects duplicate assignees before creating work", async () => {
+  const ipc = createContext();
+  const human = createNode("human://user/local");
+  const sessionManager = createSessionManager({ uri: "app://kairos/session-manager" });
+
+  try {
+    await human.connect(ipc.createTransport("human-direct-duplicates"));
+    await sessionManager.node.connect(ipc.createTransport("session-direct-duplicates"));
+
+    await human.call("app://kairos/session-manager", "create_session", {
+      mime_type: "application/json",
+      data: { session_id: "session_direct_duplicates", title: "Reject duplicate direct agents" },
+    });
+    const record = sessionManager.getSession("session_direct_duplicates");
+    assert.ok(record);
+    const tasksBefore = Object.keys(record.state.tasks).length;
+
+    await assert.rejects(
+      human.call("app://kairos/session-manager", "start_delegations", {
+        mime_type: "application/json",
+        data: {
+          session_id: record.id,
+          instruction: "Review the same request once per assignee.",
+          delegations: [
+            { assignee: "agent://local/alice" },
+            { assignee: "agent://local/alice", role: "duplicate" },
+          ],
+        },
+      }),
+      /duplicate delegation assignee/,
+    );
+
+    assert.equal(Object.keys(record.state.tasks).length, tasksBefore);
+    assert.equal(Object.keys(record.state.delegations).length, 0);
+    assert.equal(Object.keys(record.state.barriers).length, 0);
+  } finally {
+    await human.close().catch(() => undefined);
+    await sessionManager.node.close().catch(() => undefined);
+  }
+});
+
+test("direct delegation in a Slock-backed session projects artifacts to the origin thread", async () => {
+  const ipc = createContext();
+  const human = createNode("human://user/local");
+  const sessionManager = createSessionManager({ uri: "app://kairos/session-manager" });
+  const channel = createSlockChannel({
+    uri: "app://slock/channel/general",
+    session_manager_uri: "app://kairos/session-manager",
+  });
+  const capturedRuns: SlockAgentRun[] = [];
+  const alice = createAgentAdapter({ uri: "agent://local/alice", runtime: recordingRuntime("alice", capturedRuns) });
+  const events: SlockChannelEvent[] = [];
+
+  human.onEmit("*", (payload) => {
+    if (payload.mime_type === SLOCK_CHANNEL_EVENT_MIME) {
+      events.push(payload.data as SlockChannelEvent);
+    }
+  });
+
+  try {
+    await human.connect(ipc.createTransport("human-direct-slock-origin"));
+    await sessionManager.node.connect(ipc.createTransport("session-direct-slock-origin"));
+    await channel.node.connect(ipc.createTransport("channel-direct-slock-origin"));
+    await alice.node.connect(ipc.createTransport("alice-direct-slock-origin"));
+
+    await human.call("app://slock/channel/general", "subscribe", { mime_type: "application/json", data: {} });
+    const posted = await human.call("app://slock/channel/general", "post_message", {
+      mime_type: SLOCK_MESSAGE_MIME,
+      data: { text: "Create a Slock-backed session for direct delegation", thread_id: null },
+    });
+    const rootId = (posted.data as { id: string }).id;
+    await waitFor(() => sessionManager.sessions.size === 1);
+    const record = [...sessionManager.sessions.values()][0];
+    assert.ok(record);
+
+    await human.call("app://kairos/session-manager", "start_delegations", {
+      mime_type: "application/json",
+      data: {
+        session_id: record.id,
+        instruction: "Run directly inside the Slock-backed session.",
+        delegations: [{ assignee: "agent://local/alice" }],
+      },
+    });
+
+    await waitFor(() => events.some((event) => event.type === "message_created" && event.message?.projection?.presentation === "artifact"));
+    const projected = events.find((event) => event.type === "message_created" && event.message?.projection?.presentation === "artifact")?.message;
+    assert.equal(projected?.thread_id, rootId);
+    assert.equal(projected?.reply_to_id, rootId);
+    assert.equal(projected?.sender, "agent://local/alice");
+    assert.equal(projected?.projection?.session_id, record.id);
+  } finally {
+    await human.close().catch(() => undefined);
+    await sessionManager.node.close().catch(() => undefined);
+    await channel.node.close().catch(() => undefined);
+    await alice.node.close().catch(() => undefined);
+  }
+});
+
+test("direct delegation in an external session uses the configured agent event channel", async () => {
+  const ipc = createContext();
+  const human = createNode("human://user/local");
+  const sessionManager = createSessionManager({
+    uri: "app://kairos/session-manager",
+    agent_event_channel_uri: "app://slock/channel/general",
+  });
+  const channel = createSlockChannel({
+    uri: "app://slock/channel/general",
+    session_manager_uri: "app://kairos/session-manager",
+  });
+  const capturedRuns: SlockAgentRun[] = [];
+  const alice = createAgentAdapter({ uri: "agent://local/alice", runtime: recordingRuntime("alice", capturedRuns) });
+  const events: SlockChannelEvent[] = [];
+
+  human.onEmit("*", (payload) => {
+    if (payload.mime_type === SLOCK_CHANNEL_EVENT_MIME) {
+      events.push(payload.data as SlockChannelEvent);
+    }
+  });
+
+  try {
+    await human.connect(ipc.createTransport("human-external-agent-events"));
+    await sessionManager.node.connect(ipc.createTransport("session-external-agent-events"));
+    await channel.node.connect(ipc.createTransport("channel-external-agent-events"));
+    await alice.node.connect(ipc.createTransport("alice-external-agent-events"));
+
+    await human.call("app://slock/channel/general", "subscribe", { mime_type: "application/json", data: {} });
+    const created = await human.call("app://kairos/session-manager", "create_session", {
+      mime_type: "application/json",
+      data: {
+        session_id: "session_external_agent_events",
+        title: "External Dify run",
+        source_ref: { kind: "external", uri: "dify://app/kairos/conversation/conv_event/message/msg_event", label: "Dify user message" },
+      },
+    });
+    const sessionId = (created.data as { session_id: string }).session_id;
+    const record = sessionManager.getSession(sessionId);
+    assert.ok(record);
+
+    await human.call("app://kairos/session-manager", "start_delegations", {
+      mime_type: "application/json",
+      data: {
+        session_id: sessionId,
+        task_title: "External event routing",
+        instruction: "Run without a Slock origin message.",
+        mode: "parallel",
+        delegations: [{ assignee: "agent://local/alice", instruction: "Report progress and finish." }],
+      },
+    });
+
+    await waitFor(() => capturedRuns.length === 1);
+    await waitFor(() => Object.keys(record.state.artifacts).length === 1);
+
+    assert.equal(capturedRuns[0]?.channel, "app://slock/channel/general");
+    assert.ok(events.some((event) => event.type === "message_delta" && event.delta?.kind === "status" && event.delta.source === "agent://local/alice"));
+    assert.doesNotMatch(readFileSync(ipc.tracePath, "utf8"), /target is not registered: app:\/\/kairos\/session\/session_external_agent_events/);
+  } finally {
+    await human.close().catch(() => undefined);
+    await sessionManager.node.close().catch(() => undefined);
+    await channel.node.close().catch(() => undefined);
+    await alice.node.close().catch(() => undefined);
+  }
+});
+
+test("direct delegation reopens a completed task when task_id is reused", async () => {
+  const ipc = createContext();
+  const human = createNode("human://user/local");
+  const sessionManager = createSessionManager({ uri: "app://kairos/session-manager" });
+  const capturedRuns: SlockAgentRun[] = [];
+  const alice = createAgentAdapter({ uri: "agent://local/alice", runtime: recordingRuntime("alice", capturedRuns) });
+  const slowRuns: SlockAgentRun[] = [];
+  const slow = createAgentAdapter({ uri: "agent://local/slow", runtime: cancellableRuntime(slowRuns) });
+
+  try {
+    await human.connect(ipc.createTransport("human-direct-task-reopen"));
+    await sessionManager.node.connect(ipc.createTransport("session-direct-task-reopen"));
+    await alice.node.connect(ipc.createTransport("alice-direct-task-reopen"));
+    await slow.node.connect(ipc.createTransport("slow-direct-task-reopen"));
+
+    await human.call("app://kairos/session-manager", "create_session", {
+      mime_type: "application/json",
+      data: { session_id: "session_direct_task_reopen", title: "Direct task reuse" },
+    });
+    const record = sessionManager.getSession("session_direct_task_reopen");
+    assert.ok(record);
+
+    const first = await human.call("app://kairos/session-manager", "start_delegations", {
+      mime_type: "application/json",
+      data: {
+        session_id: record.id,
+        instruction: "Complete the initial direct task.",
+        delegations: [{ assignee: "agent://local/alice" }],
+      },
+    });
+    const taskId = (first.data as { task_id: string }).task_id;
+    await waitFor(() => record.state.tasks[taskId]?.status === "completed");
+
+    await human.call("app://kairos/session-manager", "start_delegations", {
+      mime_type: "application/json",
+      data: {
+        session_id: record.id,
+        task_id: taskId,
+        instruction: "Reopen this task for another direct pass.",
+        delegations: [{ assignee: "agent://local/slow" }],
+      },
+    });
+
+    await waitFor(() => slowRuns.length === 1);
+    assert.equal(record.state.tasks[taskId]?.status, "open");
+    assert.ok(record.events.some((event) => event.type === "task_updated" && event.task_id === taskId && event.patch.status === "open"));
+  } finally {
+    await human.close().catch(() => undefined);
+    await sessionManager.node.close().catch(() => undefined);
+    await alice.node.close().catch(() => undefined);
+    await slow.node.close().catch(() => undefined);
+  }
+});
+
+test("direct delegation cancellation lets remaining agents satisfy the barrier", async () => {
+  const ipc = createContext();
+  const human = createNode("human://user/local");
+  const sessionManager = createSessionManager({ uri: "app://kairos/session-manager" });
+  const slowRuns: SlockAgentRun[] = [];
+  const slow = createAgentAdapter({ uri: "agent://local/slow", runtime: cancellableRuntime(slowRuns) });
+  const cindyRuns: SlockAgentRun[] = [];
+  const cindyDeferred = deferredFinalRuntime("cindy", cindyRuns);
+  const cindy = createAgentAdapter({ uri: "agent://local/cindy", runtime: cindyDeferred.runtime });
+
+  try {
+    await human.connect(ipc.createTransport("human-direct-cancel-before-peer"));
+    await sessionManager.node.connect(ipc.createTransport("session-direct-cancel-before-peer"));
+    await slow.node.connect(ipc.createTransport("slow-direct-cancel-before-peer"));
+    await cindy.node.connect(ipc.createTransport("cindy-direct-cancel-before-peer"));
+
+    await human.call("app://kairos/session-manager", "create_session", {
+      mime_type: "application/json",
+      data: { session_id: "session_direct_cancel_before_peer", title: "Cancel one direct agent first" },
+    });
+    const record = sessionManager.getSession("session_direct_cancel_before_peer");
+    assert.ok(record);
+
+    const started = await human.call("app://kairos/session-manager", "start_delegations", {
+      mime_type: "application/json",
+      data: {
+        session_id: record.id,
+        instruction: "Let the remaining direct agent finish after cancellation.",
+        delegations: [
+          { assignee: "agent://local/slow" },
+          { assignee: "agent://local/cindy" },
+        ],
+      },
+    });
+    const run = started.data as { task_id: string; barrier_id: string };
+    await waitFor(() => slowRuns.length === 1 && cindyRuns.length === 1);
+    const slowDelegationId = Object.values(record.state.delegations).find((delegation) => delegation.assignee === "agent://local/slow")?.id;
+    assert.ok(slowDelegationId);
+
+    await human.call("app://kairos/session-manager", "cancel_delegation_run", {
+      mime_type: "application/json",
+      data: { session_id: record.id, delegation_id: slowDelegationId, reason: "cancel slow only" },
+    });
+    await waitFor(() => record.state.delegations[slowDelegationId]?.status === "cancelled");
+    assert.equal(record.state.barriers[run.barrier_id]?.status, "open");
+    assert.deepEqual(record.state.barriers[run.barrier_id]?.expected_from, ["agent://local/cindy"]);
+
+    cindyDeferred.resolve();
+    await waitFor(() => record.state.barriers[run.barrier_id]?.status === "satisfied" && record.state.tasks[run.task_id]?.status === "completed");
+  } finally {
+    await human.close().catch(() => undefined);
+    await sessionManager.node.close().catch(() => undefined);
+    await slow.node.close().catch(() => undefined);
+    await cindy.node.close().catch(() => undefined);
+  }
+});
+
+test("direct delegation cancellation satisfies the barrier when another agent already replied", async () => {
+  const ipc = createContext();
+  const human = createNode("human://user/local");
+  const sessionManager = createSessionManager({ uri: "app://kairos/session-manager" });
+  const aliceRuns: SlockAgentRun[] = [];
+  const alice = createAgentAdapter({ uri: "agent://local/alice", runtime: recordingRuntime("alice", aliceRuns) });
+  const slowRuns: SlockAgentRun[] = [];
+  const slow = createAgentAdapter({ uri: "agent://local/slow", runtime: cancellableRuntime(slowRuns) });
+
+  try {
+    await human.connect(ipc.createTransport("human-direct-cancel-after-peer"));
+    await sessionManager.node.connect(ipc.createTransport("session-direct-cancel-after-peer"));
+    await alice.node.connect(ipc.createTransport("alice-direct-cancel-after-peer"));
+    await slow.node.connect(ipc.createTransport("slow-direct-cancel-after-peer"));
+
+    await human.call("app://kairos/session-manager", "create_session", {
+      mime_type: "application/json",
+      data: { session_id: "session_direct_cancel_after_peer", title: "Cancel after one reply" },
+    });
+    const record = sessionManager.getSession("session_direct_cancel_after_peer");
+    assert.ok(record);
+
+    const started = await human.call("app://kairos/session-manager", "start_delegations", {
+      mime_type: "application/json",
+      data: {
+        session_id: record.id,
+        instruction: "One direct agent replies before the other is cancelled.",
+        delegations: [
+          { assignee: "agent://local/alice" },
+          { assignee: "agent://local/slow" },
+        ],
+      },
+    });
+    const run = started.data as { task_id: string; barrier_id: string };
+    await waitFor(() => Object.values(record.state.artifacts).some((artifact) => artifact.author === "agent://local/alice") && slowRuns.length === 1);
+    const slowDelegationId = Object.values(record.state.delegations).find((delegation) => delegation.assignee === "agent://local/slow")?.id;
+    assert.ok(slowDelegationId);
+
+    await human.call("app://kairos/session-manager", "cancel_delegation_run", {
+      mime_type: "application/json",
+      data: { session_id: record.id, delegation_id: slowDelegationId, reason: "alice already answered" },
+    });
+
+    await waitFor(() => record.state.barriers[run.barrier_id]?.status === "satisfied" && record.state.tasks[run.task_id]?.status === "completed");
+    assert.deepEqual(record.state.barriers[run.barrier_id]?.expected_from, ["agent://local/alice"]);
+  } finally {
+    await human.close().catch(() => undefined);
+    await sessionManager.node.close().catch(() => undefined);
+    await alice.node.close().catch(() => undefined);
+    await slow.node.close().catch(() => undefined);
+  }
+});
+
+test("direct delegation cancellation only updates the barrier for its batch", async () => {
+  const ipc = createContext();
+  const human = createNode("human://user/local");
+  const sessionManager = createSessionManager({ uri: "app://kairos/session-manager" });
+  const slowRuns: SlockAgentRun[] = [];
+  const slow = createAgentAdapter({ uri: "agent://local/slow", runtime: cancellableRuntime(slowRuns) });
+  const cindyRuns: SlockAgentRun[] = [];
+  const cindyDeferred = deferredFinalRuntime("cindy", cindyRuns);
+  const cindy = createAgentAdapter({ uri: "agent://local/cindy", runtime: cindyDeferred.runtime });
+  const aliceRuns: SlockAgentRun[] = [];
+  const aliceDeferred = deferredFinalRuntime("alice", aliceRuns);
+  const alice = createAgentAdapter({ uri: "agent://local/alice", runtime: aliceDeferred.runtime });
+
+  try {
+    await human.connect(ipc.createTransport("human-direct-cancel-scoped"));
+    await sessionManager.node.connect(ipc.createTransport("session-direct-cancel-scoped"));
+    await slow.node.connect(ipc.createTransport("slow-direct-cancel-scoped"));
+    await cindy.node.connect(ipc.createTransport("cindy-direct-cancel-scoped"));
+    await alice.node.connect(ipc.createTransport("alice-direct-cancel-scoped"));
+
+    await human.call("app://kairos/session-manager", "create_session", {
+      mime_type: "application/json",
+      data: { session_id: "session_direct_cancel_scoped", title: "Scoped direct cancellation" },
+    });
+    const record = sessionManager.getSession("session_direct_cancel_scoped");
+    assert.ok(record);
+
+    const first = await human.call("app://kairos/session-manager", "start_delegations", {
+      mime_type: "application/json",
+      data: {
+        session_id: record.id,
+        instruction: "Keep first direct batch open.",
+        delegations: [
+          { assignee: "agent://local/slow" },
+          { assignee: "agent://local/cindy" },
+        ],
+      },
+    });
+    const firstRun = first.data as { task_id: string; delegation_ids: string[]; barrier_id: string };
+    await waitFor(() => slowRuns.length === 1 && cindyRuns.length === 1);
+
+    const second = await human.call("app://kairos/session-manager", "start_delegations", {
+      mime_type: "application/json",
+      data: {
+        session_id: record.id,
+        task_id: firstRun.task_id,
+        instruction: "Keep second direct batch open too.",
+        delegations: [
+          { assignee: "agent://local/slow" },
+          { assignee: "agent://local/alice" },
+        ],
+      },
+    });
+    const secondRun = second.data as { delegation_ids: string[]; barrier_id: string };
+    await waitFor(() => slowRuns.length === 2 && aliceRuns.length === 1);
+    const secondSlowDelegationId = secondRun.delegation_ids.find((id) => record.state.delegations[id]?.assignee === "agent://local/slow");
+    assert.ok(secondSlowDelegationId);
+
+    await human.call("app://kairos/session-manager", "cancel_delegation_run", {
+      mime_type: "application/json",
+      data: { session_id: record.id, delegation_id: secondSlowDelegationId, reason: "cancel second slow only" },
+    });
+    await waitFor(() => record.state.delegations[secondSlowDelegationId]?.status === "cancelled");
+
+    assert.equal(record.state.barriers[firstRun.barrier_id]?.status, "open");
+    assert.deepEqual(record.state.barriers[firstRun.barrier_id]?.expected_from, ["agent://local/slow", "agent://local/cindy"]);
+    assert.equal(record.state.barriers[secondRun.barrier_id]?.status, "open");
+    assert.deepEqual(record.state.barriers[secondRun.barrier_id]?.expected_from, ["agent://local/alice"]);
+  } finally {
+    await human.close().catch(() => undefined);
+    await sessionManager.node.close().catch(() => undefined);
+    await slow.node.close().catch(() => undefined);
+    await cindy.node.close().catch(() => undefined);
+    await alice.node.close().catch(() => undefined);
+  }
+});
+
 function recordingRuntime(name: string, capturedRuns: SlockAgentRun[]): AgentRuntime {
   return {
     async *run(input) {
@@ -867,6 +1569,96 @@ function recordingRuntime(name: string, capturedRuns: SlockAgentRun[]): AgentRun
   };
 }
 
+function cancellableRuntime(capturedRuns: SlockAgentRun[]): AgentRuntime {
+  return {
+    async *run(input, context) {
+      capturedRuns.push(input);
+      await new Promise<void>((resolve) => {
+        if (context.signal?.aborted) {
+          resolve();
+          return;
+        }
+        context.signal?.addEventListener("abort", () => resolve(), { once: true });
+        setTimeout(resolve, 5000);
+      });
+      if (context.signal?.aborted) {
+        return;
+      }
+      yield {
+        type: "final",
+        result: {
+          summary: "slow completed",
+          final_text: "slow completed",
+        },
+      };
+    },
+  };
+}
+
+function deferredFinalRuntime(name: string, capturedRuns: SlockAgentRun[]): { runtime: AgentRuntime; resolve: () => void } {
+  let resolveRun: (() => void) | undefined;
+  const ready = new Promise<void>((resolve) => {
+    resolveRun = resolve;
+  });
+  return {
+    resolve: () => resolveRun?.(),
+    runtime: {
+      async *run(input) {
+        capturedRuns.push(input);
+        await ready;
+        yield {
+          type: "final",
+          result: {
+            summary: `${name} completed`,
+            final_text: `${name} completed ${input.session_id} ${input.delegation_id}`,
+          },
+        };
+      },
+    },
+  };
+}
+
+function legacyStreamingRuntime(capturedRuns: SlockAgentRun[]): AgentRuntime {
+  return {
+    async *run(input) {
+      capturedRuns.push(input);
+      yield { type: "message_delta", text: "Legacy streamed body that belongs in an artifact." };
+      yield {
+        type: "final",
+        result: {
+          summary: "Legacy final summary.",
+          final_text: "Legacy final body that should only be stored as an artifact.",
+        },
+      };
+    },
+  };
+}
+
+function progressOnlyRuntime(capturedRuns: SlockAgentRun[]): AgentRuntime {
+  return {
+    async *run(input, context) {
+      capturedRuns.push(input);
+      await context.node.call("app://kairos/session-manager", "report_message", {
+        mime_type: "application/json",
+        data: {
+          session_id: input.session_id,
+          delegation_id: input.delegation_id,
+          visibility: "human",
+          purpose: "progress",
+          text: "Checking implementation path.",
+        },
+      });
+      yield {
+        type: "final",
+        result: {
+          summary: "Detailed artifact for review.",
+          final_text: "Detailed artifact for review.",
+        },
+      };
+    },
+  };
+}
+
 function reportingRuntime(capturedRuns: SlockAgentRun[]): AgentRuntime {
   return {
     async *run(input, context) {
@@ -877,6 +1669,7 @@ function reportingRuntime(capturedRuns: SlockAgentRun[]): AgentRuntime {
           session_id: input.session_id,
           delegation_id: input.delegation_id,
           visibility: "human",
+          purpose: "progress",
           text: "Checking implementation path.",
         },
       });
@@ -893,7 +1686,7 @@ function reportingRuntime(capturedRuns: SlockAgentRun[]): AgentRuntime {
       yield {
         type: "final",
         result: {
-          summary: "Detailed artifact for review.",
+          summary: "Finding: Implementation path is ready enough to review. The first pass found a coherent route through the session manager and channel projection code.\n\nRisk: File boundary still needs validation before the session can be treated as low-risk. The artifact calls out which ownership lines Cindy should verify next.\n\nNext: Review the artifact for the detailed checklist, then decide whether the boundary needs another focused pass.",
           final_text: "Detailed artifact for review.",
         },
       };
@@ -928,11 +1721,13 @@ function coordinatorRuntime(capturedRuns: SlockAgentRun[]): AgentRuntime {
 
 function createContext() {
   const dir = mkdtempSync(join("/tmp", "kairos-ipc-session-manager-test-"));
+  const tracePath = join(dir, "trace.jsonl");
   const registry = new EndpointRegistry();
-  const trace = new TraceWriter(join(dir, "trace.jsonl"));
+  const trace = new TraceWriter(tracePath);
   const router = new Router({ registry, capabilityGate: new AllowAllCapabilityGate(), trace });
 
   return {
+    tracePath,
     createTransport(id: string): IpcTransport {
       return new MemoryKernelTransport(id, registry, router, trace);
     },

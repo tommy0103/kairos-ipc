@@ -1,5 +1,6 @@
 node_modules/
 packages/slock-ui-bridge/dist/
+packages/kairos-desk-ui/dist/
 traces/
 dev.docs/
 *.log
@@ -7,3 +8,7 @@ dev.docs/
 dependencies/
 .configs/
 AGENTS.md
+
+.impeccable/
+.superpowers/
+

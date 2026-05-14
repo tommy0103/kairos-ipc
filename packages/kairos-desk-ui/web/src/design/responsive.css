@@ -1,0 +1,189 @@
+@media (max-width: 1180px) {
+  .desk-shell,
+  .desk-shell.inspector-open {
+    grid-template-columns: 56px 260px minmax(0, 1fr);
+  }
+
+  .desk-shell.diff-reader-mode,
+  .desk-shell.diff-reader-mode.inspector-open {
+    grid-template-columns: 56px minmax(0, 1fr);
+  }
+
+  .topbar,
+  .desk-shell.inspector-open .topbar {
+    grid-template-columns: 56px 260px minmax(0, 1fr) auto;
+  }
+
+  .desk-shell.diff-reader-mode .topbar,
+  .desk-shell.diff-reader-mode.inspector-open .topbar {
+    grid-template-columns: 56px minmax(0, 1fr) auto;
+  }
+
+  .right-inspector {
+    display: none;
+  }
+
+  .projects-dashboard {
+    max-width: none;
+  }
+
+  .project-canvas-header {
+    grid-template-columns: 1fr;
+  }
+
+  .project-facts {
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  .project-header-side {
+    justify-items: start;
+  }
+
+  .work-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .observe-summary-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .observe-summary-item.wide,
+  .observe-summary-strip > .secondary-button {
+    grid-column: 1 / -1;
+  }
+
+  .observe-workspace {
+    grid-template-columns: minmax(240px, 0.78fr) minmax(420px, 1.22fr);
+  }
+
+  .observe-audit-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .artifact-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .artifact-outline {
+    border-top: 1px solid var(--kd-border);
+    padding: 18px 24px 22px;
+  }
+}
+
+@media (max-width: 820px) {
+  body {
+    overflow: auto;
+  }
+
+  .desk-shell,
+  .desk-shell.inspector-open {
+    min-width: 360px;
+    min-height: 100vh;
+    height: auto;
+    grid-template-columns: 52px minmax(0, 1fr);
+    grid-template-rows: 46px auto 1fr;
+  }
+
+  .desk-shell.diff-reader-mode,
+  .desk-shell.diff-reader-mode.inspector-open {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+
+  .topbar,
+  .desk-shell.inspector-open .topbar {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+
+  .desk-shell.diff-reader-mode .topbar,
+  .desk-shell.diff-reader-mode.inspector-open .topbar {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+
+  .workspace-menu,
+  .runtime-health,
+  .desk-sidebar {
+    display: none;
+  }
+
+  .global-search {
+    width: calc(100% - 18px);
+    justify-self: start;
+  }
+
+  .workspace-rail {
+    grid-row: 2 / 4;
+  }
+
+  .main-surface {
+    grid-column: 2;
+    grid-row: 2 / 4;
+  }
+
+  .surface-header {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: 12px 14px;
+  }
+
+  .surface-header .header-actions {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .project-canvas-header {
+    gap: 14px;
+  }
+
+  .project-title-block h1 {
+    font-size: 20px;
+    line-height: 27px;
+  }
+
+  .project-header-actions,
+  .attention-strip-actions {
+    justify-content: flex-start;
+  }
+
+  .attention-strip {
+    grid-template-columns: 28px minmax(0, 1fr);
+  }
+
+  .attention-strip-actions {
+    grid-column: 2;
+  }
+
+  .observe-summary-strip,
+  .observe-workspace,
+  .observe-audit-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-brief {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .trace-insight-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .trace-detail-actions {
+    justify-content: flex-start;
+  }
+
+  .artifact-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .artifact-actions {
+    justify-content: flex-start;
+  }
+
+  .artifact-compact-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+}

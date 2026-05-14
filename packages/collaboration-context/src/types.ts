@@ -11,6 +11,7 @@ export type ArtifactStatus = "draft" | "submitted" | "accepted" | "superseded" |
 export type ArtifactKind = "evaluation" | "summary" | "research_note" | "patch" | "decision_record" | "question_answer" | "validation_result" | "final_synthesis";
 export type QuestionStatus = "asked" | "answered" | "cancelled";
 export type CollaborationNoteVisibility = "human" | "agents" | "all";
+export type CollaborationNotePurpose = "progress" | "final_summary";
 export type BarrierMode = "all" | "any" | "quorum" | "all_or_timeout";
 export type BarrierStatus = "open" | "satisfied" | "timed_out" | "cancelled" | "failed";
 export type ApprovalStatus = "pending" | "approved" | "rejected" | "cancelled" | "expired";
@@ -112,6 +113,7 @@ export interface CollaborationNote {
   from: EndpointUri;
   to?: EndpointUri[];
   visibility: CollaborationNoteVisibility;
+  purpose?: CollaborationNotePurpose;
   text: string;
   delegation_id?: string;
   source_refs: SourceRef[];
@@ -330,6 +332,33 @@ export interface ToolCallSummary {
   trace_ref?: TraceRef;
 }
 
+export type BuildBoardColumnKey = "todo" | "building" | "review" | "validate" | "done";
+
+export interface BuildBoardItem {
+  id: string;
+  kind: "task" | "delegation" | "artifact" | "approval" | "validation";
+  title: string;
+  status: string;
+  owner?: EndpointUri;
+  agent?: EndpointUri;
+  summary?: string;
+  source_refs: SourceRef[];
+  trace_refs: TraceRef[];
+}
+
+export interface BuildBoardColumn {
+  key: BuildBoardColumnKey;
+  label: string;
+  items: BuildBoardItem[];
+}
+
+export interface BuildBoardProjection {
+  active: boolean;
+  reason: string;
+  write_operations: ToolCallSummary[];
+  columns: BuildBoardColumn[];
+}
+
 export interface WorkBlocker {
   kind: WorkBlockerKind;
   label: string;
@@ -366,6 +395,7 @@ export interface SessionWorkProjection {
   current_work?: string;
   latest_report?: string;
   latest_artifact?: ArtifactSummary;
+  build_board?: BuildBoardProjection;
   blockers: WorkBlocker[];
   actions: WorkAction[];
   origin?: SourceRef;

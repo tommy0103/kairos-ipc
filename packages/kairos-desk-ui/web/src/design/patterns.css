@@ -1,0 +1,94 @@
+.dashboard,
+.artifact-page,
+.agents-page,
+.observe-page,
+.settings-page {
+  padding: 18px 20px 26px;
+}
+
+.dashboard-header,
+.lens-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.dashboard-title {
+  margin: 0;
+  color: var(--kd-ink);
+  font-size: 21px;
+  line-height: 28px;
+  font-weight: var(--kd-weight-bold);
+}
+
+.dashboard-subtitle {
+  margin-top: 3px;
+  color: var(--kd-muted);
+  font-size: 13px;
+}
+
+.section-band {
+  margin-top: 16px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.section-heading h2 {
+  margin: 0;
+  color: var(--kd-ink);
+  font-size: 15px;
+  line-height: 21px;
+  font-weight: var(--kd-weight-semibold);
+}
+
+.section-heading-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--kd-muted);
+  font-size: 12px;
+  line-height: 16px;
+  min-width: 0;
+}
+
+.section-heading-meta span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.project-summary-grid,
+.agent-grid,
+.evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.project-summary h3,
+.agent-card h3,
+.evidence-card h3,
+.work-card h3 {
+  margin: 0;
+  color: var(--kd-ink);
+  font-size: 14px;
+  line-height: 19px;
+  font-weight: var(--kd-weight-semibold);
+}
+
+.project-summary p,
+.agent-card p,
+.evidence-card p,
+.work-card p {
+  margin: 6px 0 0;
+  color: var(--kd-text);
+  font-size: 13px;
+  line-height: 19px;
+}

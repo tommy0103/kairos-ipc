@@ -63,6 +63,8 @@ test("UI bridge frontend is implemented as a Vue app", () => {
   assert.match(app, /currentStatusToolList/);
   assert.match(app, /previousStatusTools/);
   assert.match(app, /class="agent-current-tool"/);
+  assert.match(app, /Drafting response\./);
+  assert.doesNotMatch(app, /row\.text \+= delta\.text/);
   assert.match(app, /toolInlineEndpointLabel/);
   assert.match(app, /class="endpoint-kind-icon"/);
   assert.match(app, /type DashboardEvent/);
@@ -79,6 +81,8 @@ test("UI bridge frontend is implemented as a Vue app", () => {
   assert.match(app, /role="tab"/);
   assert.match(app, /class="session-board"/);
   assert.match(app, /class="session-work-card"/);
+  assert.match(app, /class="build-scrum-board"/);
+  assert.match(app, /buildBoardWriteOperationLabel/);
   assert.match(app, /class="session-inspector"/);
   assert.match(server, /KAIROS_DASHBOARD_EVENT_MIME/);
   assert.match(server, /subscribe_dashboard/);
@@ -88,6 +92,7 @@ test("UI bridge frontend is implemented as a Vue app", () => {
   assert.match(server, /review_artifact/);
   assert.match(server, /resolve_approval/);
   assert.match(style, /\.session-detail-tabs/);
+  assert.match(style, /\.build-board-columns/);
   assert.match(style, /\.review-queue-item/);
   assert.match(style, /\.artifact-projection-row/);
   assert.match(app, /isArtifactProjectionMessage/);

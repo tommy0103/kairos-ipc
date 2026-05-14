@@ -1,0 +1,56 @@
+identity:
+  name: resolve_approval
+  author: tomiya
+  label:
+    en_US: Resolve Kairos approval
+    zh_Hans: 处理 Kairos approval
+description:
+  human:
+    en_US: Approve, reject, or cancel a Kairos approval record.
+    zh_Hans: 通过、拒绝或取消 Kairos approval record。
+  llm: Resolve an existing Kairos approval record.
+parameters:
+  - name: approval_id
+    type: string
+    required: true
+    label:
+      en_US: Approval id
+      zh_Hans: Approval id
+    form: llm
+  - name: status
+    type: select
+    required: true
+    label:
+      en_US: Status
+      zh_Hans: 状态
+    options:
+      - value: approved
+        label:
+          en_US: Approved
+          zh_Hans: 通过
+      - value: rejected
+        label:
+          en_US: Rejected
+          zh_Hans: 拒绝
+      - value: cancelled
+        label:
+          en_US: Cancelled
+          zh_Hans: 取消
+    form: llm
+  - name: session_id
+    type: string
+    required: false
+    label:
+      en_US: Session id
+      zh_Hans: Session id
+    form: llm
+  - name: resolution_note
+    type: string
+    required: false
+    label:
+      en_US: Resolution note
+      zh_Hans: 处理备注
+    form: llm
+extra:
+  python:
+    source: tools/resolve_approval.py

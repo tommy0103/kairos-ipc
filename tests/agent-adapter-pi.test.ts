@@ -174,6 +174,55 @@ test("pi-ai runtime uses rendered session context before channel history", async
 
     const finalEvent = events.find((event) => event.type === "final");
     assert.equal(finalEvent?.result.final_text, "Session context accepted.");
+    assert.equal(events.some((event) => event.type === "message_delta"), false);
+  } finally {
+    pi.unregister();
+  }
+});
+
+test("pi-ai runtime splits session final output into summary and artifact layers", async () => {
+  const pi = registerFauxProvider({ tokensPerSecond: 1000 });
+  pi.setResponses([
+    fauxAssistantMessage(fauxText([
+      "Summary:",
+      "Finding: Architecture boundary is clear enough to proceed. The session manager owns collaboration state, while Slock stays focused on room projection.",
+      "Risk: The remaining uncertainty is validation depth. Tool traces and review artifacts should prove that session updates do not leak into kernel or SDK behavior.",
+      "Next: Open the artifact for the full boundary map and migration notes. Use that as the checklist before wiring more multi-agent UI.",
+      "Artifact:",
+      "# Architecture Review",
+      "",
+      "- Boundary looks coherent.",
+      "- Validation evidence should be added next.",
+    ].join("\n"))),
+  ]);
+
+  const runtime = createPiRuntime({ model: pi.getModel() });
+
+  try {
+    const events = [];
+    for await (const event of runtime.run({
+      channel: "app://slock/channel/general",
+      message_id: "channel_msg_1",
+      text: "@alice review architecture",
+      sender: "human://user/local",
+      session_id: "session_1",
+      delegation_id: "delegation_1",
+      context_text: "SESSION RENDERED CONTEXT",
+    }, {
+      agent_uri: "agent://local/pi-assistant",
+      node: {
+        uri: "agent://local/pi-assistant",
+        call: async () => {
+          throw new Error("history should not be loaded when context_text is present");
+        },
+      },
+    })) {
+      events.push(event);
+    }
+
+    const finalEvent = events.find((event) => event.type === "final");
+    assert.equal(finalEvent?.result.summary, "Finding: Architecture boundary is clear enough to proceed. The session manager owns collaboration state, while Slock stays focused on room projection.\n\nRisk: The remaining uncertainty is validation depth. Tool traces and review artifacts should prove that session updates do not leak into kernel or SDK behavior.\n\nNext: Open the artifact for the full boundary map and migration notes. Use that as the checklist before wiring more multi-agent UI.");
+    assert.equal(finalEvent?.result.final_text, "# Architecture Review\n\n- Boundary looks coherent.\n- Validation evidence should be added next.");
   } finally {
     pi.unregister();
   }

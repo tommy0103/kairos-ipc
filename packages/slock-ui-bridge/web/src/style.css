@@ -1,18 +1,20 @@
 :root {
   color-scheme: light;
   --chromatix-pi: 3.14159265;
-  --slock-accent-hue: 178;
+  --slock-accent-hue: 252;
   --slock-success-hue: 150;
-  --slock-warning-hue: 72;
+  --slock-warning-hue: 35;
   --slock-danger-hue: 25;
-  --slock-info-hue: 225;
-  --slock-agent-hue: 92;
+  --slock-info-hue: 238;
+  --slock-agent-hue: 150;
+  --slock-artifact-hue: 305;
   --accent-chroma: calc(0.18 + (cos(var(--slock-accent-hue) * var(--chromatix-pi) / 180) * 0.04));
   --success-chroma: calc(0.18 + (cos(var(--slock-success-hue) * var(--chromatix-pi) / 180) * 0.04));
   --warning-chroma: calc(0.18 + (cos(var(--slock-warning-hue) * var(--chromatix-pi) / 180) * 0.04));
   --danger-chroma: calc(0.18 + (cos(var(--slock-danger-hue) * var(--chromatix-pi) / 180) * 0.04));
   --info-chroma: calc(0.18 + (cos(var(--slock-info-hue) * var(--chromatix-pi) / 180) * 0.04));
   --agent-chroma: calc(0.18 + (cos(var(--slock-agent-hue) * var(--chromatix-pi) / 180) * 0.04));
+  --artifact-chroma: calc(0.18 + (cos(var(--slock-artifact-hue) * var(--chromatix-pi) / 180) * 0.04));
   --accent-50: color-mix(in oklch, oklch(1 0 none) 70%, oklch(95% calc(0.3 * var(--accent-chroma)) var(--slock-accent-hue)));
   --accent-100: color-mix(in oklch, oklch(1 0 none) 20%, oklch(95% calc(0.5 * var(--accent-chroma)) var(--slock-accent-hue)));
   --accent-200: oklch(90% calc(0.6 * var(--accent-chroma)) var(--slock-accent-hue));
@@ -79,19 +81,37 @@
   --agent-800: oklch(42% calc(0.85 * var(--agent-chroma)) var(--slock-agent-hue));
   --agent-900: oklch(37% calc(0.7 * var(--agent-chroma)) var(--slock-agent-hue));
   --agent-950: oklch(29% calc(0.5 * var(--agent-chroma)) var(--slock-agent-hue));
-  --canvas: oklch(98% 0.006 190);
-  --surface: oklch(95% 0.01 190);
-  --surface-strong: oklch(91% 0.014 190);
-  --border: oklch(84% 0.018 190);
-  --muted: oklch(53% 0.026 205);
-  --text: oklch(31% 0.018 210);
-  --ink: oklch(20% 0.014 220);
+  --artifact-50: color-mix(in oklch, oklch(1 0 none) 70%, oklch(95% calc(0.3 * var(--artifact-chroma)) var(--slock-artifact-hue)));
+  --artifact-100: color-mix(in oklch, oklch(1 0 none) 20%, oklch(95% calc(0.5 * var(--artifact-chroma)) var(--slock-artifact-hue)));
+  --artifact-200: oklch(90% calc(0.6 * var(--artifact-chroma)) var(--slock-artifact-hue));
+  --artifact-300: oklch(85% calc(0.75 * var(--artifact-chroma)) var(--slock-artifact-hue));
+  --artifact-400: oklch(74% calc(0.85 * var(--artifact-chroma)) var(--slock-artifact-hue));
+  --artifact-500: oklch(62% calc(1 * var(--artifact-chroma)) var(--slock-artifact-hue));
+  --artifact-600: oklch(54% calc(1.15 * var(--artifact-chroma)) var(--slock-artifact-hue));
+  --artifact-700: oklch(49% calc(1.1 * var(--artifact-chroma)) var(--slock-artifact-hue));
+  --artifact-800: oklch(42% calc(0.85 * var(--artifact-chroma)) var(--slock-artifact-hue));
+  --artifact-900: oklch(37% calc(0.7 * var(--artifact-chroma)) var(--slock-artifact-hue));
+  --artifact-950: oklch(29% calc(0.5 * var(--artifact-chroma)) var(--slock-artifact-hue));
+  --canvas: oklch(98% 0.008 248);
+  --surface: oklch(95% 0.012 250);
+  --surface-strong: oklch(91% 0.016 250);
+  --border: oklch(84% 0.02 250);
+  --muted: oklch(53% 0.03 250);
+  --text: oklch(31% 0.02 252);
+  --ink: oklch(20% 0.016 255);
   --accent: var(--accent-500);
   --success: var(--success-500);
   --warning: var(--warning-300);
   --danger: var(--danger-500);
   --info: var(--info-500);
   --agent-thinking: var(--agent-400);
+  --human: var(--warning-500);
+  --artifact: var(--artifact-500);
+  --evidence: var(--info-500);
+  --role-human-soft: color-mix(in oklch, var(--human) 10%, var(--canvas));
+  --role-agent-soft: color-mix(in oklch, var(--success) 9%, var(--canvas));
+  --role-artifact-soft: color-mix(in oklch, var(--artifact) 9%, var(--canvas));
+  --role-evidence-soft: color-mix(in oklch, var(--evidence) 8%, var(--canvas));
   --shadow: 0 14px 36px oklch(31% 0.018 210 / 0.08);
   --font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
@@ -106,6 +126,1300 @@
   --radius-sm: 5px;
   --radius-md: 7px;
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Mock-atlas implementation shell. The legacy app-shell is intentionally not rendered. */
+.atlas-app {
+  --atlas-canvas: oklch(98% 0.012 250);
+  --atlas-surface: oklch(95.5% 0.018 260);
+  --atlas-surface-2: oklch(91.5% 0.024 258);
+  --atlas-line: oklch(84% 0.025 255);
+  --atlas-soft-line: color-mix(in oklch, var(--atlas-line) 52%, transparent);
+  --atlas-ink: oklch(20% 0.018 262);
+  --atlas-text: oklch(32% 0.024 258);
+  --atlas-muted: oklch(53% 0.035 252);
+  --atlas-primary: oklch(55% 0.145 252);
+  --atlas-human: oklch(64% 0.145 30);
+  --atlas-agent: oklch(66% 0.13 150);
+  --atlas-artifact: oklch(61% 0.13 304);
+  --atlas-observe: oklch(58% 0.105 220);
+  --atlas-done: oklch(62% 0.12 155);
+  --atlas-bad: oklch(58% 0.15 24);
+  display: grid;
+  grid-template-columns: 218px minmax(0, 1fr);
+  height: 100vh;
+  min-height: 100vh;
+  overflow: hidden;
+  background: var(--atlas-canvas);
+  color: var(--atlas-text);
+  font-family: var(--font-sans);
+}
+
+.atlas-app button {
+  font: inherit;
+}
+
+.atlas-app .rail {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--atlas-line);
+  background: color-mix(in oklch, var(--atlas-surface) 82%, var(--atlas-canvas));
+  padding: 14px 11px;
+  display: grid;
+  align-content: start;
+  gap: 18px;
+}
+
+.atlas-app .brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--atlas-ink);
+  font-size: 15px;
+  line-height: 21px;
+  font-weight: 760;
+}
+
+.atlas-app .brand-mark {
+  width: 29px;
+  height: 29px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: color-mix(in oklch, var(--atlas-primary) 14%, var(--atlas-canvas));
+  color: color-mix(in oklch, var(--atlas-primary) 82%, var(--atlas-ink));
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.atlas-app .nav-group {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.atlas-app .nav-label {
+  margin: 5px 9px;
+  color: var(--atlas-muted);
+  font-size: 11px;
+  line-height: 15px;
+  font-weight: 750;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.atlas-app .nav-item {
+  min-width: 0;
+  min-height: 35px;
+  border: 0;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: transparent;
+  color: var(--atlas-text);
+  padding: 0 9px;
+  text-align: left;
+}
+
+.atlas-app .nav-item:hover,
+.atlas-app .nav-item.active {
+  background: color-mix(in oklch, var(--atlas-primary) 10%, var(--atlas-canvas));
+  color: var(--atlas-ink);
+}
+
+.atlas-app .nav-item strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 660;
+}
+
+.atlas-app .nav-count {
+  flex: 0 0 auto;
+  color: var(--atlas-muted);
+  font-size: 12px;
+  line-height: 16px;
+  max-width: 76px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atlas-app .nav-empty {
+  margin: 0 9px;
+  color: var(--atlas-muted);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.atlas-app .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 99px;
+  background: var(--atlas-agent);
+  display: inline-block;
+  margin-right: 7px;
+}
+
+.atlas-app .dot.need { background: var(--atlas-human); }
+.atlas-app .dot.doc { background: var(--atlas-artifact); }
+.atlas-app .dot.observe { background: var(--atlas-observe); }
+.atlas-app .dot.bad { background: var(--atlas-bad); }
+.atlas-app .dot.done { background: var(--atlas-done); }
+.atlas-app .dot.quiet { background: var(--atlas-muted); opacity: 0.62; }
+
+.atlas-app .main {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.atlas-app .topbar {
+  min-width: 0;
+  min-height: 0;
+  border-bottom: 1px solid var(--atlas-line);
+  background: color-mix(in oklch, var(--atlas-canvas) 82%, var(--atlas-surface));
+  padding: 14px 18px 12px;
+  display: grid;
+  gap: 11px;
+}
+
+.atlas-app .mobile-nav {
+  display: none;
+}
+
+.atlas-app .mobile-nav-item {
+  min-height: 32px;
+  border: 1px solid var(--atlas-soft-line);
+  border-radius: 10px;
+  background: color-mix(in oklch, var(--atlas-canvas) 76%, var(--atlas-surface));
+  color: var(--atlas-muted);
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 800;
+}
+
+.atlas-app .mobile-nav-item.active {
+  border-color: color-mix(in oklch, var(--atlas-primary) 25%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-primary) 9%, var(--atlas-canvas));
+  color: color-mix(in oklch, var(--atlas-primary) 82%, var(--atlas-ink));
+}
+
+.atlas-app .top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+}
+
+.atlas-app .title {
+  min-width: 0;
+}
+
+.atlas-app .title h1 {
+  margin: 0;
+  color: var(--atlas-ink);
+  font-size: 22px;
+  line-height: 30px;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atlas-app .title p {
+  margin: 2px 0 0;
+  color: var(--atlas-muted);
+  font-size: 12px;
+  line-height: 17px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atlas-app .toolbar,
+.atlas-app .actions,
+.atlas-app .tabs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.atlas-app .button,
+.atlas-app .button-tonal,
+.atlas-app .button-text,
+.atlas-app .mini {
+  border-radius: 10px;
+  border: 1px solid transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  font-size: 12px;
+  line-height: 16px;
+  font-weight: 760;
+}
+
+.atlas-app .button,
+.atlas-app .button-tonal,
+.atlas-app .button-text {
+  height: 32px;
+  padding: 0 12px;
+}
+
+.atlas-app .button {
+  background: var(--atlas-primary);
+  border-color: var(--atlas-primary);
+  color: var(--atlas-canvas);
+}
+
+.atlas-app .button-tonal {
+  background: color-mix(in oklch, var(--atlas-primary) 10%, var(--atlas-canvas));
+  color: color-mix(in oklch, var(--atlas-primary) 82%, var(--atlas-ink));
+  border-color: color-mix(in oklch, var(--atlas-primary) 22%, var(--atlas-line));
+}
+
+.atlas-app .button-text {
+  background: transparent;
+  color: var(--atlas-primary);
+}
+
+.atlas-app .tab {
+  min-height: 28px;
+  border-radius: 999px;
+  padding: 0 10px;
+  border: 1px solid var(--atlas-soft-line);
+  background: color-mix(in oklch, var(--atlas-canvas) 76%, var(--atlas-surface));
+  color: var(--atlas-muted);
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: 780;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.atlas-app button.tab {
+  cursor: pointer;
+}
+
+.atlas-app .tab.active {
+  border-color: color-mix(in oklch, var(--atlas-primary) 25%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-primary) 9%, var(--atlas-canvas));
+  color: color-mix(in oklch, var(--atlas-primary) 82%, var(--atlas-ink));
+}
+
+.atlas-app .tab.need,
+.atlas-app .chip.need,
+.atlas-app .mini.human {
+  border-color: color-mix(in oklch, var(--atlas-human) 34%, var(--atlas-line));
+  color: color-mix(in oklch, var(--atlas-human) 72%, var(--atlas-ink));
+}
+
+.atlas-app .tab.doc,
+.atlas-app .chip.doc {
+  border-color: color-mix(in oklch, var(--atlas-artifact) 28%, var(--atlas-line));
+  color: color-mix(in oklch, var(--atlas-artifact) 74%, var(--atlas-ink));
+}
+
+.atlas-app .tab.observe,
+.atlas-app .chip.observe {
+  border-color: color-mix(in oklch, var(--atlas-observe) 26%, var(--atlas-line));
+  color: color-mix(in oklch, var(--atlas-observe) 76%, var(--atlas-ink));
+}
+
+.atlas-app .tab.bad,
+.atlas-app .chip.bad {
+  border-color: color-mix(in oklch, var(--atlas-bad) 28%, var(--atlas-line));
+  color: color-mix(in oklch, var(--atlas-bad) 72%, var(--atlas-ink));
+}
+
+.atlas-app .content {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+.atlas-app .two-col { grid-template-columns: minmax(0, 1fr) 350px; }
+.atlas-app .wide-side { grid-template-columns: minmax(0, 1fr) 420px; }
+.atlas-app .three-col { grid-template-columns: 230px minmax(0, 1fr) 300px; }
+.atlas-app .stack { display: grid; gap: 12px; align-content: start; min-width: 0; }
+
+.atlas-app .panel,
+.atlas-app .board-shell,
+.atlas-app .room-stream,
+.atlas-app .reader,
+.atlas-app .table-shell {
+  border: 1px solid var(--atlas-line);
+  border-radius: 14px;
+  background: color-mix(in oklch, var(--atlas-canvas) 88%, var(--atlas-surface));
+}
+
+.atlas-app .panel {
+  padding: 12px;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.atlas-app .panel h3,
+.atlas-app .section-head h3 {
+  margin: 0;
+  color: var(--atlas-ink);
+  font-size: 14px;
+  line-height: 19px;
+}
+
+.atlas-app .panel p {
+  margin: 0;
+  color: var(--atlas-muted);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.atlas-app .empty-panel {
+  justify-items: start;
+  padding: 18px;
+}
+
+.atlas-app .quiet-panel {
+  opacity: 0.76;
+}
+
+.atlas-app .bad-panel,
+.atlas-app .banner.bad {
+  border-color: color-mix(in oklch, var(--atlas-bad) 35%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-bad) 7%, var(--atlas-canvas));
+}
+
+.atlas-app .section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.atlas-app .section-head span {
+  color: var(--atlas-muted);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.atlas-app .banner {
+  border: 1px solid color-mix(in oklch, var(--atlas-human) 35%, var(--atlas-line));
+  border-radius: 14px;
+  background: color-mix(in oklch, var(--atlas-human) 7%, var(--atlas-canvas));
+  padding: 13px 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+}
+
+.atlas-app .banner strong {
+  color: var(--atlas-ink);
+  font-size: 15px;
+  line-height: 21px;
+}
+
+.atlas-app .banner p {
+  margin: 3px 0 0;
+  color: var(--atlas-text);
+  font-size: 13px;
+  line-height: 20px;
+  max-width: 82ch;
+}
+
+.atlas-app .mini {
+  min-height: 28px;
+  border-radius: 999px;
+  border-color: color-mix(in oklch, var(--atlas-primary) 22%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-primary) 8%, var(--atlas-canvas));
+  color: color-mix(in oklch, var(--atlas-primary) 82%, var(--atlas-ink));
+  padding: 0 10px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.atlas-app .mini.primary {
+  background: var(--atlas-primary);
+  border-color: var(--atlas-primary);
+  color: var(--atlas-canvas);
+}
+
+.atlas-app .mini.human {
+  background: var(--atlas-human);
+  border-color: var(--atlas-human);
+  color: var(--atlas-canvas);
+}
+
+.atlas-app .mini.soft {
+  color: var(--atlas-muted);
+  border-color: var(--atlas-soft-line);
+  background: color-mix(in oklch, var(--atlas-surface) 62%, var(--atlas-canvas));
+}
+
+.atlas-app .project-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 11px;
+}
+
+.atlas-app .project-card,
+.atlas-app .work-card,
+.atlas-app .agent-card,
+.atlas-app .endpoint-card,
+.atlas-app .artifact-row,
+.atlas-app .room-row,
+.atlas-app .choice {
+  border: 1px solid var(--atlas-soft-line);
+  border-radius: 12px;
+  background: color-mix(in oklch, var(--atlas-canvas) 90%, var(--atlas-surface));
+  padding: 11px;
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  color: inherit;
+  text-align: left;
+}
+
+.atlas-app .project-card.need,
+.atlas-app .work-card.need,
+.atlas-app .attention-card.need {
+  border-color: color-mix(in oklch, var(--atlas-human) 32%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-human) 5%, var(--atlas-canvas));
+}
+
+.atlas-app .project-card.live,
+.atlas-app .work-card.live {
+  border-color: color-mix(in oklch, var(--atlas-agent) 30%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-agent) 5%, var(--atlas-canvas));
+}
+
+.atlas-app .project-card.doc,
+.atlas-app .work-card.doc,
+.atlas-app .artifact-row,
+.atlas-app .attention-card.doc {
+  border-color: color-mix(in oklch, var(--atlas-artifact) 28%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-artifact) 5%, var(--atlas-canvas));
+}
+
+.atlas-app .work-card.observe,
+.atlas-app .attention-card.observe {
+  border-color: color-mix(in oklch, var(--atlas-observe) 28%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-observe) 5%, var(--atlas-canvas));
+}
+
+.atlas-app .work-card.done,
+.atlas-app .project-card.done {
+  opacity: 0.65;
+  background: color-mix(in oklch, var(--atlas-surface) 58%, var(--atlas-canvas));
+}
+
+.atlas-app .card-button {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  text-align: left;
+}
+
+.atlas-app .card-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+}
+
+.atlas-app .card-top strong,
+.atlas-app .artifact-row strong,
+.atlas-app .room-row strong,
+.atlas-app .agent-card strong,
+.atlas-app .endpoint-card strong,
+.atlas-app .project-card > strong {
+  min-width: 0;
+  color: var(--atlas-ink);
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atlas-app .project-card p,
+.atlas-app .work-card p,
+.atlas-app .agent-card p,
+.atlas-app .endpoint-card p,
+.atlas-app .room-row p {
+  margin: 0;
+  color: var(--atlas-text);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.atlas-app .project-card p,
+.atlas-app .work-card p,
+.atlas-app .room-row p {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+.atlas-app .project-card .project-signal-preview {
+  display: grid;
+  min-width: 0;
+  min-height: 48px;
+  gap: 4px;
+  margin: 0;
+  color: var(--atlas-text);
+  overflow: hidden;
+}
+
+.atlas-app .project-card .project-signal-preview > span,
+.atlas-app .project-card .project-signal-preview > strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.atlas-app .project-card .project-signal-preview > span {
+  color: var(--atlas-muted);
+  font-size: 10px;
+  line-height: 14px;
+  font-weight: 680;
+}
+
+.atlas-app .project-card .project-signal-preview > strong {
+  color: var(--atlas-ink);
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 560;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.atlas-app .project-card .project-signal-preview--digest {
+  align-content: start;
+  border-radius: 10px;
+  background: color-mix(in oklch, var(--atlas-surface) 52%, transparent);
+  padding: 8px 9px;
+}
+
+.atlas-app .project-card .project-card-head--compact {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 8px;
+  align-items: start;
+  min-width: 0;
+}
+
+.atlas-app .project-card .project-card-head-title {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.atlas-app .project-card .project-card-head-title > span {
+  color: var(--atlas-muted);
+  font-size: 10px;
+  line-height: 14px;
+  font-weight: 680;
+}
+
+.atlas-app .project-card .project-card-head-title > strong {
+  color: var(--atlas-ink);
+  font-size: 12px;
+  line-height: 17px;
+  font-weight: 680;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atlas-app .project-card .project-card-head--compact .chip {
+  min-height: 20px;
+  padding: 1px 6px;
+  font-weight: 680;
+}
+
+.atlas-app .chip {
+  min-height: 22px;
+  border: 1px solid var(--atlas-soft-line);
+  border-radius: 999px;
+  padding: 2px 7px;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  color: var(--atlas-muted);
+  font-size: 10px;
+  line-height: 14px;
+  font-weight: 800;
+  background: color-mix(in oklch, var(--atlas-surface) 55%, var(--atlas-canvas));
+}
+
+.atlas-app .chip.live {
+  color: color-mix(in oklch, var(--atlas-agent) 70%, var(--atlas-ink));
+  border-color: color-mix(in oklch, var(--atlas-agent) 28%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-agent) 8%, var(--atlas-canvas));
+}
+
+.atlas-app .chip.need {
+  background: color-mix(in oklch, var(--atlas-human) 8%, var(--atlas-canvas));
+}
+
+.atlas-app .chip.doc {
+  background: color-mix(in oklch, var(--atlas-artifact) 8%, var(--atlas-canvas));
+}
+
+.atlas-app .chip.observe {
+  background: color-mix(in oklch, var(--atlas-observe) 8%, var(--atlas-canvas));
+}
+
+.atlas-app .meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  color: var(--atlas-muted);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.atlas-app .tiny-progress {
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in oklch, var(--atlas-surface-2) 70%, var(--atlas-canvas));
+}
+
+.atlas-app .tiny-progress span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--atlas-primary);
+}
+
+.atlas-app .board-shell {
+  padding: 12px;
+  display: grid;
+  gap: 11px;
+  min-width: 0;
+}
+
+.atlas-app .board {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(146px, 1fr));
+  gap: 10px;
+  min-width: 0;
+}
+
+.atlas-app .column {
+  min-width: 0;
+  display: grid;
+  gap: 9px;
+  align-content: start;
+}
+
+.atlas-app .column-head {
+  min-height: 32px;
+  border-radius: 10px;
+  padding: 0 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  background: color-mix(in oklch, var(--atlas-surface) 64%, var(--atlas-canvas));
+}
+
+.atlas-app .column-head strong {
+  color: var(--atlas-ink);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.atlas-app .column-head span,
+.atlas-app .column-empty {
+  color: var(--atlas-muted);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.atlas-app .work-card {
+  min-height: 104px;
+  box-shadow: 0 8px 20px color-mix(in oklch, var(--atlas-ink) 4%, transparent);
+}
+
+.atlas-app .detail-object-grid-atlas {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.atlas-app .room-stream {
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+}
+
+.atlas-app .full-room {
+  min-height: 0;
+}
+
+.atlas-app .full-room .messages {
+  padding-inline: 18px;
+}
+
+.atlas-app .full-room .message,
+.atlas-app .full-room .artifact-attachment,
+.atlas-app .full-room .room-card {
+  max-width: 860px;
+}
+
+.atlas-app .room-head {
+  border-bottom: 1px solid var(--atlas-soft-line);
+  padding: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
+  background: color-mix(in oklch, var(--atlas-surface) 58%, var(--atlas-canvas));
+}
+
+.atlas-app .room-head strong {
+  color: var(--atlas-ink);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.atlas-app .room-head span {
+  color: var(--atlas-muted);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.atlas-app .messages {
+  min-height: 0;
+  overflow: auto;
+  padding: 13px 12px;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.atlas-app .message {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 9px;
+  min-width: 0;
+}
+
+.atlas-app .avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  color: var(--atlas-ink);
+  font-size: 11px;
+  font-weight: 850;
+  background: var(--atlas-surface-2);
+}
+
+.atlas-app .avatar.agent {
+  background: color-mix(in oklch, var(--atlas-agent) 12%, var(--atlas-canvas));
+  color: color-mix(in oklch, var(--atlas-agent) 76%, var(--atlas-ink));
+}
+
+.atlas-app .avatar.human {
+  background: color-mix(in oklch, var(--atlas-human) 11%, var(--atlas-canvas));
+  color: color-mix(in oklch, var(--atlas-human) 74%, var(--atlas-ink));
+}
+
+.atlas-app .message-body {
+  min-width: 0;
+  max-width: 74ch;
+  display: grid;
+  gap: 5px;
+}
+
+.atlas-app .message-meta {
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  color: var(--atlas-muted);
+  font-size: 11px;
+}
+
+.atlas-app .message-meta strong {
+  color: var(--atlas-ink);
+  font-size: 13px;
+}
+
+.atlas-app .message-text {
+  margin: 0;
+  color: var(--atlas-text);
+  font-size: 14px;
+  line-height: 21px;
+  overflow-wrap: anywhere;
+}
+
+.atlas-app .message .reply-action {
+  display: none;
+}
+
+.atlas-app .message:hover .reply-action,
+.atlas-app .message:focus-within .reply-action {
+  display: inline-flex;
+}
+
+.atlas-app .room-card {
+  border: 1px solid var(--atlas-soft-line);
+  border-radius: 12px;
+  background: color-mix(in oklch, var(--atlas-canvas) 90%, var(--atlas-surface));
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.atlas-app .room-card.need {
+  border-color: color-mix(in oklch, var(--atlas-human) 30%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-human) 6%, var(--atlas-canvas));
+}
+
+.atlas-app .room-card.doc {
+  border-color: color-mix(in oklch, var(--atlas-artifact) 26%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-artifact) 6%, var(--atlas-canvas));
+}
+
+.atlas-app .artifact-attachment {
+  margin-left: 39px;
+  border: 1px solid color-mix(in oklch, var(--atlas-artifact) 18%, var(--atlas-line));
+  border-radius: 12px;
+  background: color-mix(in oklch, var(--atlas-artifact) 2.5%, var(--atlas-canvas));
+  padding: 10px;
+  display: grid;
+  gap: 7px;
+}
+
+.atlas-app .artifact-attachment-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.atlas-app .artifact-attachment-head > span:last-child {
+  color: var(--atlas-muted);
+  font-size: 11px;
+  line-height: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atlas-app .artifact-attachment strong {
+  color: var(--atlas-ink);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.atlas-app .artifact-attachment p {
+  margin: 0;
+  color: var(--atlas-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.atlas-app .artifact-open {
+  justify-self: start;
+  border-color: color-mix(in oklch, var(--atlas-artifact) 26%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-artifact) 7%, var(--atlas-canvas));
+  color: color-mix(in oklch, var(--atlas-artifact) 76%, var(--atlas-ink));
+}
+
+.atlas-app .artifact-open:hover {
+  border-color: color-mix(in oklch, var(--atlas-artifact) 38%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-artifact) 10%, var(--atlas-canvas));
+}
+
+.atlas-app .room-card.live {
+  border-color: color-mix(in oklch, var(--atlas-agent) 26%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-agent) 6%, var(--atlas-canvas));
+}
+
+.atlas-app .composer {
+  border-top: 1px solid var(--atlas-soft-line);
+  padding: 10px 12px;
+  background: color-mix(in oklch, var(--atlas-surface) 58%, var(--atlas-canvas));
+  display: grid;
+}
+
+.atlas-app .composer-box {
+  min-height: 42px;
+  border: 1px solid var(--atlas-line);
+  border-radius: 12px;
+  background: var(--atlas-canvas);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px 6px 11px;
+  width: min(100%, 860px);
+}
+
+.atlas-app .composer-box textarea {
+  min-width: 0;
+  width: 100%;
+  resize: vertical;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--atlas-text);
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.atlas-app .thread-context {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--atlas-muted);
+  font-size: 12px;
+}
+
+.atlas-app .tool-line {
+  border: 1px solid var(--atlas-soft-line);
+  border-radius: 10px;
+  background: color-mix(in oklch, var(--atlas-surface) 58%, var(--atlas-canvas));
+  padding: 7px 9px;
+}
+
+.atlas-app .tool-line summary {
+  color: var(--atlas-ink);
+  font-size: 12px;
+  line-height: 17px;
+  cursor: pointer;
+}
+
+.atlas-app .tool-line pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  font: 400 11px / 16px var(--font-mono);
+  color: var(--atlas-text);
+}
+
+.atlas-app .atlas-filter-row {
+  grid-template-columns: minmax(240px, 380px) minmax(0, 1fr);
+}
+
+.atlas-app .atlas-input {
+  min-height: 30px;
+  border: 1px solid var(--atlas-line);
+  border-radius: 10px;
+  background: var(--atlas-canvas);
+  color: var(--atlas-text);
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+.atlas-app .table-shell {
+  overflow: hidden;
+}
+
+.atlas-app .row {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr) 170px 240px 120px;
+  gap: 12px;
+  align-items: center;
+  padding: 11px 12px;
+  border-top: 1px solid var(--atlas-soft-line);
+  min-width: 0;
+}
+
+.atlas-app .row:first-child {
+  border-top: 0;
+}
+
+.atlas-app .row.header {
+  background: color-mix(in oklch, var(--atlas-surface) 68%, var(--atlas-canvas));
+  color: var(--atlas-muted);
+  font-size: 11px;
+  font-weight: 820;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.atlas-app .row strong {
+  min-width: 0;
+  color: var(--atlas-ink);
+  font-size: 13px;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.atlas-app .row span {
+  min-width: 0;
+  color: var(--atlas-muted);
+  font-size: 11px;
+  line-height: 15px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.atlas-app .mono-line {
+  min-width: 0;
+  min-height: 28px;
+  border: 1px solid var(--atlas-soft-line);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--atlas-surface) 58%, var(--atlas-canvas));
+  padding: 5px 8px;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  color: var(--atlas-text);
+  font-size: 11px;
+}
+
+.atlas-app .mono-line code {
+  color: color-mix(in oklch, var(--atlas-primary) 76%, var(--atlas-ink));
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.atlas-app .mono-line span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.atlas-app .atlas-trace-controls {
+  margin-bottom: 0;
+}
+
+.atlas-app .trace-list {
+  border: 1px solid var(--atlas-line);
+  border-radius: 14px;
+  background: color-mix(in oklch, var(--atlas-canvas) 90%, var(--atlas-surface));
+  overflow: hidden;
+}
+
+.atlas-app .trace-event {
+  display: grid;
+  grid-template-columns: 82px 28px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--atlas-soft-line);
+}
+
+.atlas-app .trace-event:first-child {
+  border-top: 0;
+}
+
+.atlas-app .trace-time {
+  color: var(--atlas-muted);
+  font-size: 11px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.atlas-app .trace-dot {
+  width: 16px;
+  height: 16px;
+  border-radius: 99px;
+  background: var(--atlas-observe);
+  margin-top: 1px;
+}
+
+.atlas-app .trace-dot.good { background: var(--atlas-done); }
+.atlas-app .trace-dot.bad { background: var(--atlas-bad); }
+
+.atlas-app .trace-body {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.atlas-app .trace-body strong {
+  color: var(--atlas-ink);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.atlas-app .trace-body span {
+  color: var(--atlas-muted);
+  font-size: 11px;
+  line-height: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.atlas-app .artifact-markdown.compact {
+  max-width: none;
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.atlas-app .artifact-reader-grid {
+  align-items: start;
+}
+
+.atlas-app .reader {
+  overflow: hidden;
+  min-width: 0;
+}
+
+.atlas-app .reader-head {
+  border-bottom: 1px solid var(--atlas-soft-line);
+  padding: 13px 15px;
+  background: color-mix(in oklch, var(--atlas-surface) 56%, var(--atlas-canvas));
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.atlas-app .reader-head strong {
+  color: var(--atlas-ink);
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.atlas-app .reader-head span {
+  color: var(--atlas-muted);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.atlas-app .reader-body {
+  padding: 16px 18px 20px;
+  max-width: 78ch;
+}
+
+.atlas-app .reader-nav {
+  align-content: start;
+}
+
+.atlas-app .artifact-row.active {
+  border-color: color-mix(in oklch, var(--atlas-artifact) 42%, var(--atlas-line));
+  background: color-mix(in oklch, var(--atlas-artifact) 9%, var(--atlas-canvas));
+}
+
+.atlas-app .work-detail-panel {
+  min-height: 220px;
+}
+
+.atlas-app .compact-trace-list {
+  margin-top: 4px;
+}
+
+@media (max-width: 1180px) {
+  .atlas-app {
+    grid-template-columns: 72px minmax(0, 1fr);
+  }
+
+  .atlas-app .brand span,
+  .atlas-app .nav-label,
+  .atlas-app .nav-item strong,
+  .atlas-app .nav-count {
+    display: none;
+  }
+
+  .atlas-app .nav-item {
+    justify-content: center;
+    padding: 0;
+  }
+
+  .atlas-app .two-col,
+  .atlas-app .wide-side,
+  .atlas-app .three-col {
+    grid-template-columns: 1fr;
+  }
+
+  .atlas-app .project-grid,
+  .atlas-app .board,
+  .atlas-app .detail-object-grid-atlas {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .atlas-app .row {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .atlas-app .row.header {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .atlas-app {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .atlas-app .rail {
+    display: none;
+  }
+
+  .atlas-app .mobile-nav {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 7px;
+  }
+
+  .atlas-app .banner,
+  .atlas-app .project-grid,
+  .atlas-app .board,
+  .atlas-app .detail-object-grid-atlas {
+    grid-template-columns: 1fr;
+  }
+
+  .atlas-app .content {
+    padding: 12px;
+  }
+
+  .atlas-app .top-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .atlas-app .artifact-attachment {
+    margin-left: 0;
+  }
 }
 
 * {
@@ -286,6 +1600,12 @@ summary:focus-visible {
   background: color-mix(in oklch, var(--accent) 12%, var(--surface-strong));
   color: var(--ink);
   font-weight: 600;
+}
+
+.nav-item.needs-you-nav.active,
+.nav-item.needs-you-nav:hover {
+  border-color: color-mix(in oklch, var(--human) 34%, var(--border));
+  background: color-mix(in oklch, var(--human) 10%, var(--surface));
 }
 
 .nav-empty {
@@ -491,7 +1811,7 @@ summary:focus-visible {
   gap: 7px;
   min-width: 0;
   border-bottom: 1px solid color-mix(in oklch, var(--border) 54%, var(--canvas));
-  background: color-mix(in oklch, var(--accent) 4%, var(--canvas));
+  background: color-mix(in oklch, var(--artifact) 6%, var(--canvas));
   padding: 10px 22px 11px calc(22% + 36px);
   transition: background-color 160ms var(--ease-out);
 }
@@ -513,7 +1833,7 @@ summary:focus-visible {
 }
 
 .artifact-projection-row.thread-reply {
-  background: color-mix(in oklch, var(--surface) 62%, var(--canvas));
+  background: color-mix(in oklch, var(--artifact) 5%, var(--surface));
 }
 
 .session-report-header,
@@ -1747,12 +3067,36 @@ input::placeholder {
   color: color-mix(in oklch, var(--agent-thinking) 64%, var(--ink));
 }
 
-.work-phase[data-phase="decision"] {
-  border-color: color-mix(in oklch, var(--warning) 54%, var(--border));
-  background: color-mix(in oklch, var(--warning) 18%, var(--canvas));
-  color: color-mix(in oklch, var(--warning) 58%, var(--ink));
+.work-phase[data-lane="building"],
+.work-phase[data-phase="execute"],
+.work-phase[data-phase="handoff"] {
+  border-color: color-mix(in oklch, var(--success) 42%, var(--border));
+  background: var(--role-agent-soft);
+  color: color-mix(in oklch, var(--success) 64%, var(--ink));
 }
 
+.work-phase[data-lane="decide"],
+.work-phase[data-phase="decision"] {
+  border-color: color-mix(in oklch, var(--human) 42%, var(--border));
+  background: var(--role-human-soft);
+  color: color-mix(in oklch, var(--human) 64%, var(--ink));
+}
+
+.work-phase[data-lane="review"],
+.work-phase[data-phase="review"] {
+  border-color: color-mix(in oklch, var(--artifact) 36%, var(--border));
+  background: var(--role-artifact-soft);
+  color: color-mix(in oklch, var(--artifact) 62%, var(--ink));
+}
+
+.work-phase[data-lane="validate"],
+.work-phase[data-phase="validate"] {
+  border-color: color-mix(in oklch, var(--evidence) 36%, var(--border));
+  background: var(--role-evidence-soft);
+  color: color-mix(in oklch, var(--evidence) 62%, var(--ink));
+}
+
+.work-phase[data-lane="done"],
 .work-phase[data-phase="done"] {
   border-color: color-mix(in oklch, var(--success) 42%, var(--border));
   background: color-mix(in oklch, var(--success) 10%, var(--canvas));
@@ -1837,7 +3181,7 @@ input::placeholder {
 
 .dashboard-metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: color-mix(in oklch, var(--surface) 54%, var(--canvas));
@@ -1869,6 +3213,84 @@ input::placeholder {
   line-height: 26px;
   font-weight: 720;
   font-variant-numeric: tabular-nums;
+}
+
+.needs-you-band {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  border: 1px solid color-mix(in oklch, var(--human) 34%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--human) 7%, var(--canvas));
+  padding: 12px;
+}
+
+.needs-you-band-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.needs-you-band-header h2 {
+  margin: 4px 0 0;
+  color: var(--ink);
+  font-size: var(--text-md);
+  line-height: 24px;
+  font-weight: 720;
+}
+
+.needs-you-preview-list {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+
+.needs-you-preview-item {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+  min-height: 86px;
+  border: 1px solid color-mix(in oklch, var(--human) 28%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--canvas) 84%, var(--role-human-soft));
+  color: inherit;
+  padding: 9px;
+  text-align: left;
+  transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out), transform 160ms var(--ease-out);
+}
+
+.needs-you-preview-item:hover {
+  border-color: color-mix(in oklch, var(--human) 48%, var(--border));
+  background: color-mix(in oklch, var(--human) 12%, var(--canvas));
+  transform: translateY(-1px);
+}
+
+.needs-you-preview-item strong,
+.needs-you-preview-item small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.needs-you-preview-item strong {
+  color: var(--ink);
+  font-size: var(--text-sm);
+  line-height: 18px;
+  font-weight: 680;
+  white-space: nowrap;
+}
+
+.needs-you-preview-item small {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 16px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
 }
 
 .dashboard-error {
@@ -1939,6 +3361,26 @@ input::placeholder {
   padding: 10px;
 }
 
+.session-column[data-lane="decide"] {
+  background: color-mix(in oklch, var(--human) 5%, var(--canvas));
+}
+
+.session-column[data-lane="building"] {
+  background: color-mix(in oklch, var(--success) 5%, var(--canvas));
+}
+
+.session-column[data-lane="review"] {
+  background: color-mix(in oklch, var(--artifact) 5%, var(--canvas));
+}
+
+.session-column[data-lane="validate"] {
+  background: color-mix(in oklch, var(--evidence) 5%, var(--canvas));
+}
+
+.session-column[data-lane="done"] {
+  background: color-mix(in oklch, var(--surface) 55%, var(--canvas));
+}
+
 .session-column-header {
   display: flex;
   align-items: center;
@@ -1975,6 +3417,22 @@ input::placeholder {
 
 .session-work-card.selected {
   box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 16%, transparent);
+}
+
+.session-work-card[data-lane="decide"] {
+  border-color: color-mix(in oklch, var(--human) 20%, var(--border));
+}
+
+.session-work-card[data-lane="building"] {
+  border-color: color-mix(in oklch, var(--success) 20%, var(--border));
+}
+
+.session-work-card[data-lane="review"] {
+  border-color: color-mix(in oklch, var(--artifact) 22%, var(--border));
+}
+
+.session-work-card[data-lane="validate"] {
+  border-color: color-mix(in oklch, var(--evidence) 22%, var(--border));
 }
 
 .session-work-card-main {
@@ -2016,6 +3474,8 @@ input::placeholder {
 
 .session-card-summary,
 .session-card-current,
+.session-card-room,
+.session-card-artifact,
 .session-card-blockers,
 .dashboard-muted {
   min-width: 0;
@@ -2026,6 +3486,7 @@ input::placeholder {
 
 .session-card-summary,
 .session-card-current,
+.session-card-artifact,
 .session-card-blockers {
   display: block;
   overflow: hidden;
@@ -2037,6 +3498,19 @@ input::placeholder {
 
 .session-card-current {
   color: var(--text);
+}
+
+.session-card-room {
+  display: block;
+  color: color-mix(in oklch, var(--accent) 58%, var(--muted));
+  font-weight: 620;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-card-artifact {
+  color: color-mix(in oklch, var(--artifact) 58%, var(--muted));
 }
 
 .session-card-blockers:not([data-empty="true"]) {
@@ -2088,6 +3562,236 @@ input::placeholder {
 
 .session-agent-chip.muted {
   color: var(--muted);
+}
+
+.project-column-empty {
+  margin: 0;
+  border: 1px dashed color-mix(in oklch, var(--border) 84%, var(--muted));
+  border-radius: var(--radius-md);
+  color: var(--muted);
+  padding: 10px;
+  font-size: var(--text-xs);
+  line-height: 16px;
+}
+
+.build-scrum-board {
+  display: grid;
+  gap: 11px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--canvas) 76%, var(--surface));
+  padding: 12px;
+}
+
+.build-board-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 14px;
+  align-items: start;
+  min-width: 0;
+}
+
+.build-board-header h2 {
+  margin: 4px 0 0;
+  color: var(--ink);
+  font-size: var(--text-md);
+  line-height: 24px;
+  font-weight: 720;
+  overflow-wrap: anywhere;
+}
+
+.build-board-header p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+  line-height: 18px;
+}
+
+.build-write-ops {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 420px;
+  min-width: 0;
+}
+
+.build-write-ops span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  border: 1px solid color-mix(in oklch, var(--info) 30%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--info) 8%, var(--canvas));
+  color: color-mix(in oklch, var(--info) 64%, var(--ink));
+  padding: 2px 8px;
+  font-size: var(--text-xs);
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.build-write-ops span[data-state="pending"],
+.build-write-ops span[data-state="running"] {
+  border-color: color-mix(in oklch, var(--warning) 34%, var(--border));
+  background: color-mix(in oklch, var(--warning) 10%, var(--canvas));
+  color: color-mix(in oklch, var(--warning) 58%, var(--ink));
+}
+
+.build-write-ops span[data-state="failed"] {
+  border-color: color-mix(in oklch, var(--danger) 34%, var(--border));
+  background: color-mix(in oklch, var(--danger) 8%, var(--canvas));
+  color: color-mix(in oklch, var(--danger) 58%, var(--ink));
+}
+
+.build-board-columns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(220px, 1fr);
+  gap: 10px;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.build-board-column {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+  min-height: 190px;
+  border: 1px solid color-mix(in oklch, var(--border) 70%, var(--canvas));
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--surface) 46%, var(--canvas));
+  padding: 9px;
+}
+
+.build-board-column[data-column="todo"] {
+  background: color-mix(in oklch, var(--human) 5%, var(--canvas));
+}
+
+.build-board-column[data-column="building"] {
+  background: color-mix(in oklch, var(--success) 5%, var(--canvas));
+}
+
+.build-board-column[data-column="review"] {
+  background: color-mix(in oklch, var(--artifact) 5%, var(--canvas));
+}
+
+.build-board-column[data-column="validate"] {
+  background: color-mix(in oklch, var(--evidence) 5%, var(--canvas));
+}
+
+.build-board-column[data-column="done"] {
+  background: color-mix(in oklch, var(--surface) 55%, var(--canvas));
+}
+
+.build-board-column header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 26px;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 16px;
+  font-weight: 720;
+}
+
+.build-board-column header span:last-child {
+  font-variant-numeric: tabular-nums;
+}
+
+.build-board-card {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  min-height: 82px;
+  border: 1px solid color-mix(in oklch, var(--border) 74%, var(--canvas));
+  border-radius: var(--radius-md);
+  background: color-mix(in oklch, var(--canvas) 82%, var(--surface));
+  color: inherit;
+  padding: 9px;
+  text-align: left;
+  transition: background-color 160ms var(--ease-out), border-color 160ms var(--ease-out), box-shadow 160ms var(--ease-out);
+}
+
+.build-board-card:hover,
+.build-board-card.selected {
+  border-color: color-mix(in oklch, var(--accent) 32%, var(--border));
+  background: color-mix(in oklch, var(--accent) 6%, var(--canvas));
+}
+
+.build-board-card.selected {
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--accent) 14%, transparent);
+}
+
+.build-board-card strong,
+.build-board-card span,
+.build-board-card small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.build-board-card strong {
+  color: var(--ink);
+  font-size: var(--text-sm);
+  line-height: 18px;
+  font-weight: 680;
+  white-space: nowrap;
+}
+
+.build-board-card span {
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.build-board-card small {
+  color: var(--text);
+  font-size: var(--text-xs);
+  line-height: 16px;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.build-board-card[data-status="failed"],
+.build-board-card[data-status="rejected"] {
+  border-color: color-mix(in oklch, var(--danger) 30%, var(--border));
+  background: color-mix(in oklch, var(--danger) 6%, var(--canvas));
+}
+
+.build-board-card[data-status="revision_requested"],
+.build-board-card[data-kind="approval"][data-status="pending"] {
+  border-color: color-mix(in oklch, var(--human) 34%, var(--border));
+  background: color-mix(in oklch, var(--human) 8%, var(--canvas));
+}
+
+.build-board-card[data-kind="artifact"] {
+  border-color: color-mix(in oklch, var(--artifact) 26%, var(--border));
+  background: color-mix(in oklch, var(--artifact) 6%, var(--canvas));
+}
+
+.build-board-card[data-kind="validation"] {
+  border-color: color-mix(in oklch, var(--evidence) 26%, var(--border));
+  background: color-mix(in oklch, var(--evidence) 6%, var(--canvas));
+}
+
+.build-board-card[data-status="accepted"],
+.build-board-card[data-status="passed"],
+.build-board-card[data-status="completed"] {
+  border-color: color-mix(in oklch, var(--success) 30%, var(--border));
+  background: color-mix(in oklch, var(--success) 7%, var(--canvas));
+}
+
+.build-board-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  line-height: 16px;
 }
 
 .session-blocker {
@@ -2624,6 +4328,23 @@ input::placeholder {
   border-radius: var(--radius-md);
   background: color-mix(in oklch, var(--canvas) 82%, var(--surface));
   padding: 10px;
+}
+
+.review-queue-item[data-kind="approval"],
+.review-queue-item[data-kind="question"],
+.review-queue-item[data-kind="decision"] {
+  border-color: color-mix(in oklch, var(--human) 28%, var(--border));
+  background: color-mix(in oklch, var(--human) 6%, var(--canvas));
+}
+
+.review-queue-item[data-kind="artifact"] {
+  border-color: color-mix(in oklch, var(--artifact) 28%, var(--border));
+  background: color-mix(in oklch, var(--artifact) 6%, var(--canvas));
+}
+
+.review-queue-item[data-kind="validation"] {
+  border-color: color-mix(in oklch, var(--evidence) 28%, var(--border));
+  background: color-mix(in oklch, var(--evidence) 6%, var(--canvas));
 }
 
 .review-queue-main {
@@ -3358,6 +5079,10 @@ input::placeholder {
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .needs-you-preview-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .session-detail-layout {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
@@ -3444,6 +5169,10 @@ input::placeholder {
     grid-template-columns: 1fr;
   }
 
+  .needs-you-preview-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .phase-filter {
     justify-content: flex-start;
   }
@@ -3451,6 +5180,19 @@ input::placeholder {
   .session-board {
     grid-auto-flow: row;
     grid-auto-columns: auto;
+  }
+
+  .build-board-header {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .build-write-ops {
+    justify-content: flex-start;
+    max-width: none;
+  }
+
+  .build-board-columns {
+    grid-auto-columns: minmax(210px, 78vw);
   }
 
   .session-column {
@@ -3505,6 +5247,12 @@ input::placeholder {
   }
 
   .lifecycle-canvas {
+    grid-auto-flow: row;
+    grid-auto-columns: auto;
+    overflow-x: visible;
+  }
+
+  .detail-build-board .build-board-columns {
     grid-auto-flow: row;
     grid-auto-columns: auto;
     overflow-x: visible;
@@ -3694,11 +5442,11 @@ input::placeholder {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .dashboard-metric:nth-child(2) {
+  .dashboard-metric:nth-child(even) {
     border-right: 0;
   }
 
-  .dashboard-metric:nth-child(-n + 2) {
+  .dashboard-metric:nth-child(-n + 4) {
     border-bottom: 1px solid color-mix(in oklch, var(--border) 66%, var(--canvas));
   }
 

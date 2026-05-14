@@ -72,6 +72,14 @@ const answerArtifactSchema = z.object({
   content: z.unknown().describe("Question answer body. Markdown is allowed here."),
 }).passthrough().describe("Optional durable answer artifact.");
 
+const directDelegationItemSchema = z.object({
+  assignee: endpointUriSchema.describe("Agent endpoint URI to run."),
+  role: z.string().optional().describe("Stable role identifier for this delegation."),
+  role_label: z.string().optional().describe("Human-readable role label."),
+  instruction: z.string().trim().min(1).optional().describe("Delegation-specific instruction. Defaults to the request instruction."),
+  expected_output: z.string().trim().min(1).optional().describe("Delegation-specific output contract."),
+}).describe("One direct delegation target for an existing session.");
+
 export const sessionManagerSessionSnapshotSchema = z.object({
   session_id: idSchema,
   session_uri: endpointUriSchema,
@@ -86,6 +94,42 @@ export const sessionManagerSubmitArtifactRequestSchema = z.object({
   artifact: submittedArtifactSchema,
   project: z.boolean().optional().describe("When false, store without projecting a compact IM artifact row."),
 }).describe("Submit a durable artifact to a collaboration session.");
+
+export const sessionManagerStartDelegationsRequestSchema = z.object({
+  session_id: idSchema.describe("Collaboration session id."),
+  task_id: idSchema.optional().describe("Existing task id to reuse."),
+  task_title: z.string().trim().min(1).optional().describe("Task title when a direct task must be created."),
+  owner: endpointUriSchema.optional().describe("Task/barrier owner. Defaults to the caller."),
+  instruction: z.string().trim().min(1).describe("Base instruction shared by the direct delegations."),
+  expected_output: z.string().trim().min(1).optional().describe("Base output contract shared by the direct delegations."),
+  mode: z.enum(["parallel", "sequential"]).optional().describe("Run mode. The first runtime slice supports parallel execution."),
+  synthesis_requested: z.boolean().optional().describe("Explicitly request coordinator synthesis after replies. No text inference is applied."),
+  synthesis_reason: z.string().trim().min(1).optional().describe("Reason attached to an explicit synthesis request."),
+  source_refs: z.array(sourceRefSchema).optional().describe("External or IPC sources for the direct delegation."),
+  delegations: z.array(directDelegationItemSchema).min(1).describe("Direct delegation targets."),
+}).describe("Start direct agent delegations for an existing collaboration session without a Slock message.");
+
+export const sessionManagerStartDelegationsResultSchema = z.object({
+  session_id: idSchema,
+  task_id: idSchema,
+  delegation_ids: z.array(idSchema),
+  barrier_id: idSchema.optional(),
+  mode: z.enum(["parallel", "sequential"]),
+}).describe("Direct delegation run ids created for a session.");
+
+export const sessionManagerCancelDelegationRunRequestSchema = z.object({
+  session_id: idSchema.describe("Collaboration session id."),
+  delegation_id: idSchema.describe("Delegation whose active run should be cancelled."),
+  reason: z.string().trim().min(1).optional().describe("Human-readable cancellation reason."),
+}).describe("Cancel an active direct delegation run by delegation id.");
+
+export const sessionManagerCancelDelegationRunResultSchema = z.object({
+  cancelled: z.boolean(),
+  session_id: idSchema,
+  delegation_id: idSchema,
+  agent: endpointUriSchema.optional(),
+  reason: z.string().optional(),
+}).describe("Result of cancelling an active delegation run.");
 
 export const sessionManagerAskQuestionRequestSchema = z.object({
   session_id: idSchema.describe("Collaboration session id."),
@@ -110,13 +154,14 @@ export const sessionManagerAnswerQuestionRequestSchema = z.object({
 
 export const sessionManagerReportMessageRequestSchema = z.object({
   session_id: idSchema.describe("Collaboration session id."),
-  text: z.string().trim().min(1).describe("Brief IM status pulse. Human-visible text must stay under the session-manager runtime limit."),
+  text: z.string().trim().min(1).describe("Brief IM progress note. Human-visible text must be one short non-Markdown line."),
   delegation_id: idSchema.optional().describe("Delegation this status belongs to."),
   to: z.array(endpointUriSchema).optional().describe("Target agents for agent-visible coordination notes."),
   visibility: z.enum(["human", "agents", "all"]).optional().describe("Audience for this note. Defaults to human unless to is set."),
+  purpose: z.enum(["progress", "final_summary"]).optional().describe("Use progress for in-flight status. final_summary is accepted only for legacy callers; final answers should use the agent run result summary plus artifact body."),
   source_refs: z.array(sourceRefSchema).optional(),
   project: z.boolean().optional().describe("When false, record the note without projecting it into IM."),
-}).describe("Send a brief IM status pulse before final agent output.");
+}).describe("Send a brief IM progress note. Final answers are projected from agent result summaries and artifacts.");
 
 export const sessionManagerReportMessageResultSchema = z.object({
   session_id: idSchema,

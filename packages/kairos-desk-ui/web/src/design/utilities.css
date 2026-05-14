@@ -1,0 +1,13 @@
+.empty-state {
+  border: 1px dashed var(--kd-border-strong);
+  border-radius: 6px;
+  background: var(--kd-panel);
+  padding: 18px;
+  color: var(--kd-muted);
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--kd-ink);
+  font-size: 11px;
+}

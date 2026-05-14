@@ -1,0 +1,29 @@
+identity:
+  name: get_trace
+  author: tomiya
+  label:
+    en_US: Get Kairos trace
+    zh_Hans: 获取 Kairos trace
+description:
+  human:
+    en_US: Read compact trace evidence for a Kairos session or run.
+    zh_Hans: 读取 Kairos session 或 run 的简洁 trace evidence。
+  llm: Read compact trace evidence for a session or delegation run.
+parameters:
+  - name: session_id
+    type: string
+    required: false
+    label:
+      en_US: Session id
+      zh_Hans: Session id
+    form: llm
+  - name: run_id
+    type: string
+    required: false
+    label:
+      en_US: Run id
+      zh_Hans: Run id
+    form: llm
+extra:
+  python:
+    source: tools/get_trace.py

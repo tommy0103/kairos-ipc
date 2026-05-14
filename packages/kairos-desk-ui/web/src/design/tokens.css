@@ -1,0 +1,37 @@
+:root {
+  color-scheme: light;
+  --kd-topbar: oklch(27% 0.034 258);
+  --kd-rail: oklch(19% 0.038 259);
+  --kd-sidebar: oklch(31% 0.04 254);
+  --kd-sidebar-strong: oklch(27% 0.04 254);
+  --kd-sidebar-hover: oklch(100% 0.006 250 / 0.08);
+  --kd-sidebar-active: oklch(100% 0.006 250 / 0.15);
+  --kd-sidebar-text: oklch(94% 0.009 250 / 0.9);
+  --kd-sidebar-muted: oklch(88% 0.011 250 / 0.62);
+  --kd-canvas: oklch(97.5% 0.006 248);
+  --kd-panel: oklch(99.2% 0.004 248);
+  --kd-panel-2: oklch(95.5% 0.009 248);
+  --kd-panel-3: oklch(92.5% 0.011 248);
+  --kd-border: oklch(88% 0.014 248);
+  --kd-border-strong: oklch(81% 0.018 248);
+  --kd-ink: oklch(27% 0.027 255);
+  --kd-text: oklch(38% 0.026 255);
+  --kd-muted: oklch(54% 0.022 255);
+  --kd-blue: oklch(54% 0.19 263);
+  --kd-blue-hover: oklch(49% 0.2 263);
+  --kd-blue-soft: oklch(95% 0.03 263);
+  --kd-amber: oklch(78% 0.145 78);
+  --kd-amber-soft: oklch(96% 0.043 82);
+  --kd-red: oklch(58% 0.17 28);
+  --kd-red-soft: oklch(95% 0.036 28);
+  --kd-green: oklch(59% 0.118 151);
+  --kd-green-soft: oklch(94% 0.035 151);
+  --kd-purple: oklch(57% 0.13 298);
+  --kd-focus: 0 0 0 3px oklch(70% 0.14 263 / 0.3);
+  --kd-shadow: 0 16px 36px oklch(18% 0.025 255 / 0.14);
+  --kd-font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --kd-weight-regular: 400;
+  --kd-weight-medium: 500;
+  --kd-weight-semibold: 600;
+  --kd-weight-bold: 700;
+}

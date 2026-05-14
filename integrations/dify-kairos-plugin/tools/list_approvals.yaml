@@ -1,0 +1,22 @@
+identity:
+  name: list_approvals
+  author: tomiya
+  label:
+    en_US: List Kairos approvals
+    zh_Hans: 列出 Kairos approvals
+description:
+  human:
+    en_US: List pending Kairos approval requests for a session.
+    zh_Hans: 列出某个 session 待处理的 Kairos approval 请求。
+  llm: List pending approval requests for a session.
+parameters:
+  - name: session_id
+    type: string
+    required: true
+    label:
+      en_US: Session id
+      zh_Hans: Session id
+    form: llm
+extra:
+  python:
+    source: tools/list_approvals.py

@@ -1,0 +1,69 @@
+identity:
+  name: start_run
+  author: tomiya
+  label:
+    en_US: Start Kairos run
+    zh_Hans: 启动 Kairos run
+description:
+  human:
+    en_US: Start one or more agent delegations for an existing Kairos session.
+    zh_Hans: 为已有 Kairos session 启动一个或多个 agent delegations。
+  llm: Start direct Kairos agent delegations for an existing session.
+parameters:
+  - name: session_id
+    type: string
+    required: true
+    label:
+      en_US: Session id
+      zh_Hans: Session id
+    form: llm
+  - name: instruction
+    type: string
+    required: true
+    label:
+      en_US: Instruction
+      zh_Hans: 指令
+    form: llm
+  - name: agents
+    type: string
+    required: true
+    label:
+      en_US: Agents
+      zh_Hans: Agents
+    human_description:
+      en_US: Comma-separated Kairos agent endpoint URIs.
+      zh_Hans: 逗号分隔的 Kairos agent endpoint URI。
+    form: llm
+  - name: mode
+    type: select
+    required: false
+    label:
+      en_US: Mode
+      zh_Hans: 模式
+    options:
+      - value: parallel
+        label:
+          en_US: Parallel
+          zh_Hans: 并行
+      - value: sequential
+        label:
+          en_US: Sequential
+          zh_Hans: 顺序
+    form: llm
+  - name: expected_output
+    type: string
+    required: false
+    label:
+      en_US: Expected output
+      zh_Hans: 预期产物
+    form: llm
+  - name: synthesis_requested
+    type: boolean
+    required: false
+    label:
+      en_US: Request synthesis
+      zh_Hans: 请求综合
+    form: llm
+extra:
+  python:
+    source: tools/start_run.py

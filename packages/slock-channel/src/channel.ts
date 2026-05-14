@@ -93,7 +93,7 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
       const threadId = input.thread_id ?? null;
       const kind: SlockMessage["kind"] = context.envelope.header.source.startsWith("agent://") ? "agent" : "human";
       const inferredMentions = inferMentions(input.text, input.mentions, mentionAliases);
-      const threadMentions = inferredMentions.length > 0 ? [] : inferThreadMentions(threadId);
+      const threadMentions = options.session_manager_uri || inferredMentions.length > 0 ? [] : inferThreadMentions(threadId);
       const mentions = inferredMentions.length > 0
         ? inferredMentions
         : threadMentions.length > 0
@@ -379,12 +379,17 @@ export function createSlockChannel(options: SlockChannelOptions): SlockChannelEn
       return;
     }
 
+    const kind = payload.data.kind === "status" ? "status" : "text";
+    if (options.session_manager_uri && kind === "text" && context.envelope.header.source.startsWith("agent://")) {
+      return;
+    }
+
     broadcast("message_delta", {
       delta: {
         thread_id: String(payload.data.thread_id ?? ""),
         text: String(payload.data.text ?? ""),
         source: context.envelope.header.source,
-        kind: payload.data.kind === "status" ? "status" : "text",
+        kind,
         ...(isRecord(payload.data.metadata) ? { metadata: payload.data.metadata } : {}),
       },
     });

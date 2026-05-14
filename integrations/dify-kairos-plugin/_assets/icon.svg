@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Kairos IPC">
+  <rect width="64" height="64" rx="14" fill="#eef7f5"/>
+  <path d="M16 35c0-10 7-18 16-18s16 8 16 18" fill="none" stroke="#087f78" stroke-width="5" stroke-linecap="round"/>
+  <path d="M18 42h28" stroke="#20292d" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="23" cy="28" r="4" fill="#087f78"/>
+  <circle cx="41" cy="28" r="4" fill="#087f78"/>
+</svg>

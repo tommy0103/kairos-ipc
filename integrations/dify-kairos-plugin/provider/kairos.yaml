@@ -1,0 +1,45 @@
+identity:
+  author: tomiya
+  name: kairos
+  label:
+    en_US: Kairos IPC
+    zh_Hans: Kairos IPC
+  description:
+    en_US: Local-first Kairos IPC collaboration tools.
+    zh_Hans: 本地优先的 Kairos IPC 协作工具。
+  icon: ../_assets/icon.svg
+credentials_for_provider:
+  bridge_url:
+    type: text-input
+    required: true
+    label:
+      en_US: Kairos bridge URL
+      zh_Hans: Kairos bridge URL
+    placeholder:
+      en_US: http://127.0.0.1:5180
+      zh_Hans: http://127.0.0.1:5180
+    help:
+      en_US: Base URL of the local kairos-dify-bridge service.
+      zh_Hans: 本地 kairos-dify-bridge 服务的基础 URL。
+  bridge_token:
+    type: secret-input
+    required: false
+    label:
+      en_US: Bridge token
+      zh_Hans: Bridge token
+    help:
+      en_US: Optional bearer token configured by KAIROS_DIFY_BRIDGE_TOKEN.
+      zh_Hans: 可选的 KAIROS_DIFY_BRIDGE_TOKEN bearer token。
+tools:
+  - tools/start_collaboration.yaml
+  - tools/start_run.yaml
+  - tools/get_session.yaml
+  - tools/list_artifacts.yaml
+  - tools/read_artifact.yaml
+  - tools/review_artifact.yaml
+  - tools/list_approvals.yaml
+  - tools/resolve_approval.yaml
+  - tools/get_trace.yaml
+extra:
+  python:
+    source: provider/kairos.py

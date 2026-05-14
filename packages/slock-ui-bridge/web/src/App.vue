@@ -15,6 +15,7 @@ type SessionPhaseFilter = WorkPhase | "all";
 type ReviewQueueItemKind = "artifact" | "approval" | "question" | "validation" | "decision";
 type ReviewKindFilter = ReviewQueueItemKind | "all";
 type SessionDetailTab = "work" | "reports" | "inspector";
+type ProjectBoardLane = "decide" | "building" | "review" | "validate" | "done";
 
 interface SlockUiBridgeChannel {
   uri: EndpointUri;
@@ -329,10 +330,37 @@ interface AgentWorkloadItem {
   latest_tool_call?: ToolCallSummary;
 }
 
-interface SessionBoardColumn {
-  phase: WorkPhase;
+interface ProjectBoardColumn {
+  lane: ProjectBoardLane;
   label: string;
-  sessions: SessionWorkProjection[];
+  projects: SessionWorkProjection[];
+}
+
+type BuildBoardColumnKey = "todo" | "building" | "review" | "validate" | "done";
+
+interface BuildBoardItem {
+  id: string;
+  kind: "task" | "delegation" | "artifact" | "approval" | "validation";
+  title: string;
+  status: string;
+  owner?: EndpointUri;
+  agent?: EndpointUri;
+  summary?: string;
+  source_refs?: SourceRef[];
+  trace_refs?: TraceRef[];
+}
+
+interface BuildBoardColumn {
+  key: BuildBoardColumnKey;
+  label: string;
+  items: BuildBoardItem[];
+}
+
+interface BuildBoardProjection {
+  active: boolean;
+  reason: string;
+  write_operations: ToolCallSummary[];
+  columns: BuildBoardColumn[];
 }
 
 interface LifecycleColumn {
@@ -361,6 +389,7 @@ interface SessionWorkProjection {
     status: string;
     text: string;
   };
+  build_board?: BuildBoardProjection;
   blockers: WorkBlocker[];
   actions: WorkAction[];
   origin?: {
@@ -702,6 +731,7 @@ let pendingDashboardSnapshot: DashboardSnapshot | undefined;
 let detailReloadTimer: number | undefined;
 
 const dashboardPhaseOrder: WorkPhase[] = ["intake", "shape", "plan", "execute", "review", "validate", "decision", "handoff", "done"];
+const projectBoardLaneOrder: ProjectBoardLane[] = ["decide", "building", "review", "validate", "done"];
 
 const channelTitle = computed(() => activeChannel.value ? channelLabel(activeChannel.value) : "Slock");
 const latestOperations = computed(() => agentActivityRows.value
@@ -726,6 +756,28 @@ const runningDashboardAgentCount = computed(() => new Set(workSessions.value.fla
   .filter((agent) => agent.status === "running" || agent.status === "pending")
   .map((agent) => agent.agent)).size);
 const pendingReviewItemCount = computed(() => reviewQueue.value.length);
+const attentionPreviewItems = computed(() => reviewQueue.value.slice(0, 4));
+const readyArtifactProjectCount = computed(() => workSessions.value.filter((session) => Boolean(session.latest_artifact) && session.latest_artifact?.status !== "accepted").length);
+const readyArtifactProjects = computed(() => workSessions.value.filter((session) => Boolean(session.latest_artifact)).slice(0, 5));
+const recentlyConsumedProjects = computed(() => workSessions.value.filter((session) => session.phase === "done").slice(0, 4));
+const roomProjectCards = computed(() => {
+  const channel = activeChannel.value?.uri;
+  if (!channel) return workSessions.value.slice(0, 5);
+  return workSessions.value.filter((session) => session.origin?.channel === channel).slice(0, 5);
+});
+const projectDetailNeeds = computed(() => {
+  const session = detailSession.value;
+  if (!session) return [];
+  return reviewQueue.value.filter((item) => item.session_id === session.session_id).slice(0, 4);
+});
+const projectDetailNotes = computed(() => sessionDetail.value?.notes.slice(-8).reverse() ?? []);
+const agentRuntimeRows = computed(() => knownAgents.value.map((agent) => {
+  const workload = agentWorkload.value.find((item) => item.agent === agent);
+  const project = workSessions.value.find((session) => session.agents.some((item) => item.agent === agent));
+  const activeRow = agentActivityRows.value.find((row) => row.source === agent);
+  return { agent, workload, project, activeRow };
+}));
+const observeAuditEvents = computed(() => traceState.events.slice(0, 12));
 const dashboardUpdatedAt = computed(() => dashboardLastEventAt.value);
 const dashboardIsStale = computed(() => {
   if (!dashboardUpdatedAt.value) return false;
@@ -743,7 +795,7 @@ const sessionPhaseFilters = computed(() => {
   for (const session of workSessions.value) {
     counts.set(session.phase, (counts.get(session.phase) ?? 0) + 1);
   }
-  return ["all", "intake", "shape", "plan", "execute", "review", "validate", "decision", "handoff", "done"]
+  return ["all", ...dashboardPhaseOrder]
     .map((phase) => ({ phase: phase as SessionPhaseFilter, label: phase === "all" ? "All" : phaseLabel(phase as WorkPhase), count: counts.get(phase as SessionPhaseFilter) ?? 0 }))
     .filter((item) => item.phase === "all" || item.count > 0);
 });
@@ -764,20 +816,20 @@ const visibleWorkSessions = computed(() => {
     return searchable.includes(query);
   });
 });
-const sessionBoardColumns = computed<SessionBoardColumn[]>(() => {
-  const grouped = new Map<WorkPhase, SessionWorkProjection[]>();
+const projectBoardColumns = computed<ProjectBoardColumn[]>(() => {
+  const grouped = new Map<ProjectBoardLane, SessionWorkProjection[]>();
   for (const session of visibleWorkSessions.value) {
-    const sessions = grouped.get(session.phase) ?? [];
-    sessions.push(session);
-    grouped.set(session.phase, sessions);
+    const lane = projectBoardLane(session);
+    const projects = grouped.get(lane) ?? [];
+    projects.push(session);
+    grouped.set(lane, projects);
   }
-  const phases = sessionPhaseFilter.value === "all"
-    ? dashboardPhaseOrder.filter((phase) => (grouped.get(phase)?.length ?? 0) > 0)
-    : [sessionPhaseFilter.value as WorkPhase];
-  return phases.map((phase) => ({ phase, label: phaseLabel(phase), sessions: grouped.get(phase) ?? [] }));
+  return projectBoardLaneOrder.map((lane) => ({ lane, label: projectBoardLaneLabel(lane), projects: grouped.get(lane) ?? [] }));
 });
 const selectedSession = computed(() => workSessions.value.find((session) => session.session_id === selectedSessionId.value) ?? visibleWorkSessions.value[0] ?? null);
 const detailSession = computed(() => sessionDetail.value?.session ?? selectedSession.value ?? null);
+const selectedBuildBoard = computed(() => selectedSession.value?.build_board ?? null);
+const detailBuildBoard = computed(() => detailSession.value?.build_board ?? null);
 const selectedSessionReviews = computed(() => selectedSession.value ? reviewQueue.value.filter((item) => item.session_id === selectedSession.value?.session_id) : []);
 const detailObjectCounts = computed(() => {
   const detail = sessionDetail.value;
@@ -793,6 +845,28 @@ const detailObjectCounts = computed(() => {
 const detailLifecycleColumns = computed(() => lifecycleColumns(sessionDetail.value));
 const inspectorObject = computed(() => resolveInspectorObject(selectedInspectorRef.value));
 const inspectorEvents = computed(() => inspectorObject.value ? eventsForObject(inspectorObject.value.ref) : []);
+const artifactReaderObject = computed(() => {
+  const object = inspectorObject.value;
+  return object?.ref.kind === "artifact" ? object : null;
+});
+const artifactReaderId = computed(() => artifactReaderObject.value?.ref.id ?? "");
+const artifactReaderTitle = computed(() => artifactReaderObject.value?.title ?? "Artifact");
+const artifactReaderStatus = computed(() => artifactReaderObject.value?.status ?? "recorded");
+const artifactReaderAuthor = computed(() => {
+  const payload = artifactReaderObject.value?.payload;
+  return isRecord(payload) && typeof payload.author === "string" ? endpointLabel(payload.author) : "agent";
+});
+const artifactReaderMarkdown = computed(() => artifactReaderObject.value ? inspectorMarkdownText(artifactReaderObject.value) : "");
+const artifactReaderSourceLabels = computed(() => artifactReaderObject.value?.source_refs.map(sourceRefLabel) ?? []);
+const artifactReaderTraceLabels = computed(() => artifactReaderObject.value?.trace_refs.map(traceRefLabel) ?? []);
+const detailArtifacts = computed(() => sessionDetail.value?.artifacts ?? []);
+const inspectorTitle = computed(() => inspectorObject.value?.title ?? "Work card");
+const inspectorEyebrow = computed(() => inspectorObject.value?.eyebrow ?? "Work card");
+const inspectorStatus = computed(() => inspectorObject.value?.status ?? "recorded");
+const inspectorSummary = computed(() => inspectorObject.value?.summary ?? "No summary recorded");
+const inspectorPayloadPreview = computed(() => inspectorObject.value ? objectPreview(inspectorObject.value.payload) : "No payload recorded");
+const inspectorSourceLabels = computed(() => inspectorObject.value?.source_refs.map(sourceRefLabel) ?? []);
+const inspectorTraceLabels = computed(() => inspectorObject.value?.trace_refs.map(traceRefLabel) ?? []);
 const selectedAgentWorkload = computed(() => {
   const session = selectedSession.value;
   if (!session) return [];
@@ -822,35 +896,51 @@ const visibleReviewQueue = computed(() => {
 const pendingApprovalCount = computed(() => rows.value.filter((row) => row.rowType === "approval").length
   + agentActivityRows.value.filter((row) => row.rowType === "tool" && Boolean(row.approval) && !row.approvalResult).length);
 const traceStatus = computed(() => {
-  if (traceState.loading) return "loading trace";
-  if (traceState.error) return "trace error";
-  if (!traceState.available) return "trace unavailable";
-  return `${traceState.stats.total_events} events in ${traceState.stats.group_count} groups`;
+  if (traceState.loading) return "loading audit";
+  if (traceState.error) return "observe error";
+  if (!traceState.available) return "observe unavailable";
+  return `${traceState.stats.total_events} events in ${traceState.stats.group_count} audit groups`;
 });
 const traceIssueCount = computed(() => traceState.events.filter((event) => traceIsIssue(event)).length);
+const workspaceKicker = computed(() => {
+  if (activeView.value === "sessions") return "Projects";
+  if (activeView.value === "session") return "Project";
+  if (activeView.value === "review") return "Projects / Needs You";
+  if (activeView.value === "trace") return "Observe";
+  if (activeView.value === "agent") return "Agents";
+  return "Room";
+});
+const workspaceAriaLabel = computed(() => {
+  if (activeView.value === "sessions") return "Projects dashboard";
+  if (activeView.value === "session") return "Project detail";
+  if (activeView.value === "review") return "Needs You";
+  if (activeView.value === "agent") return "Agent workload";
+  if (activeView.value === "trace") return "Observe runtime audit";
+  return "Room conversation";
+});
 const workspaceTitle = computed(() => {
-  if (activeView.value === "sessions") return "Work Dashboard";
-  if (activeView.value === "session") return detailSession.value?.title ?? "Session Detail";
-  if (activeView.value === "review") return "Review Queue";
-  if (activeView.value === "trace") return "Trace";
-  if (activeView.value === "agent") return activeAgentUri.value ?? "Agent";
+  if (activeView.value === "sessions") return "Projects";
+  if (activeView.value === "session") return detailSession.value ? `Project: ${detailSession.value.title}` : "Project Detail";
+  if (activeView.value === "review") return "Needs You";
+  if (activeView.value === "trace") return "Observe";
+  if (activeView.value === "agent") return activeAgentUri.value ? `Agent: ${agentLabel(activeAgentUri.value)}` : "Agents";
   return channelTitle.value;
 });
 const workspaceStatus = computed(() => {
   if (activeView.value === "sessions") {
-    if (sessionsLoading.value) return "loading sessions";
+    if (sessionsLoading.value) return "loading projects";
     if (sessionsError.value) return sessionsError.value;
-    return `${workSessions.value.length} sessions · ${activeWorkSessionCount.value} active · ${pendingReviewItemCount.value} waiting`;
+    return `${workSessions.value.length} projects · ${activeWorkSessionCount.value} active · ${pendingReviewItemCount.value} need you`;
   }
   if (activeView.value === "session") {
-    if (sessionDetailLoading.value) return "loading session";
+    if (sessionDetailLoading.value) return "loading project";
     if (sessionDetailError.value) return sessionDetailError.value;
     const session = detailSession.value;
-    return session ? `${session.phase_label} · ${session.status} · ${sessionUpdatedAt(session) || "live"}` : "session not selected";
+    return session ? `${projectLaneLabelForSession(session)} · ${session.status} · ${sessionUpdatedAt(session) || "live"}` : "project not selected";
   }
-  if (activeView.value === "review") return `${reviewQueue.value.length} waiting · ${visibleReviewQueue.value.length} visible`;
+  if (activeView.value === "review") return `${reviewQueue.value.length} need you · ${visibleReviewQueue.value.length} visible`;
   if (activeView.value === "trace") return traceStatus.value;
-  if (activeView.value === "agent") return "agent dashboard";
+  if (activeView.value === "agent") return "actor lens across projects";
   return status.value;
 });
 
@@ -935,6 +1025,11 @@ function showChat(): void {
   activeAgentUri.value = null;
 }
 
+function showAgents(): void {
+  activeView.value = "agent";
+  activeAgentUri.value = activeAgentUri.value ?? knownAgents.value[0] ?? null;
+}
+
 function openAgentDashboard(uri: EndpointUri): void {
   rememberAgent(uri);
   activeAgentUri.value = uri;
@@ -952,9 +1047,20 @@ async function openSessionDetail(session: SessionWorkProjection | string, object
   selectedSessionId.value = sessionId;
   activeAgentUri.value = null;
   activeView.value = "session";
-  sessionDetailTab.value = "work";
+  sessionDetailTab.value = objectRef ? "inspector" : "work";
   selectedInspectorRef.value = objectRef ?? { kind: "session", id: sessionId };
   await loadSessionDetail(sessionId);
+}
+
+function openSessionArtifacts(): void {
+  sessionDetailTab.value = "inspector";
+  const firstArtifact = detailArtifacts.value[0];
+  if (firstArtifact) {
+    selectedInspectorRef.value = { kind: "artifact", id: firstArtifact.id };
+    return;
+  }
+  const session = detailSession.value;
+  if (session) selectedInspectorRef.value = { kind: "session", id: session.session_id };
 }
 
 async function openSessionThread(session: SessionWorkProjection): Promise<void> {
@@ -1003,25 +1109,63 @@ function phaseLabel(phase: WorkPhase): string {
   }
 }
 
+function projectBoardLane(session: SessionWorkProjection): ProjectBoardLane {
+  if (session.phase === "done") return "done";
+  if (session.phase === "review") return "review";
+  if (session.phase === "validate") return "validate";
+  if (session.phase === "execute" || session.phase === "handoff") return "building";
+  return "decide";
+}
+
+function projectBoardLaneLabel(lane: ProjectBoardLane): string {
+  switch (lane) {
+    case "decide": return "Decide";
+    case "building": return "Building";
+    case "review": return "Review";
+    case "validate": return "Validate";
+    case "done": return "Done";
+  }
+}
+
+function projectLaneLabelForSession(session: SessionWorkProjection): string {
+  return projectBoardLaneLabel(projectBoardLane(session));
+}
+
 function selectSession(sessionId: string): void {
   selectedSessionId.value = sessionId;
 }
 
 function selectInspector(kind: InspectorKind, id: string): void {
   selectedInspectorRef.value = { kind, id };
-  sessionDetailTab.value = sessionDetailTab.value === "reports" ? "inspector" : sessionDetailTab.value;
+  sessionDetailTab.value = "inspector";
 }
 
 function sessionSearchPlaceholder(): string {
-  return workSessions.value.length > 0 ? "Search sessions, agents, blockers" : "Search sessions";
+  return workSessions.value.length > 0 ? "Search projects, agents, blockers" : "Search projects";
+}
+
+function compactPreviewText(value: string | undefined, fallback: string, maxLength = 180): string {
+  const normalized = (value ?? "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/#{1,6}\s+/g, "")
+    .replace(/-{3,}/g, " ")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/^\s*\d+[.)]\s+/gm, "")
+    .replace(/[>*_|]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const text = normalized || fallback;
+  return text.length > maxLength ? `${text.slice(0, maxLength - 3).trim()}...` : text;
 }
 
 function sessionPrimaryText(session: SessionWorkProjection): string {
-  return session.objective || session.current_work || session.phase_reason || "No current work recorded";
+  return compactPreviewText(session.objective || session.current_work || session.phase_reason, "No current work recorded");
 }
 
 function sessionSignalText(session: SessionWorkProjection): string {
-  return session.current_work || session.latest_report || session.phase_reason || "Waiting for next event";
+  return compactPreviewText(session.current_work || session.latest_report || session.phase_reason, "Waiting for next event");
 }
 
 function sessionBlockerSummary(session: SessionWorkProjection): string {
@@ -1063,6 +1207,145 @@ function toolCallLabel(toolCall?: ToolCallSummary): string {
   return `${endpointLabel(toolCall.endpoint)}.${toolCall.action}${toolCall.payload_summary ? ` ${toolCall.payload_summary}` : ""}`;
 }
 
+function buildBoardTitle(board: BuildBoardProjection): string {
+  return board.active ? "Scrum build board" : "Build review";
+}
+
+function buildBoardStatus(board: BuildBoardProjection): string {
+  const activeColumns = board.columns.filter((column) => column.items.length > 0);
+  const cardCount = activeColumns.reduce((sum, column) => sum + column.items.length, 0);
+  const writeCount = board.write_operations.length;
+  return `${cardCount} cards · ${writeCount} write ${writeCount === 1 ? "operation" : "operations"}`;
+}
+
+function buildBoardItemMeta(item: BuildBoardItem): string {
+  const owner = item.agent ?? item.owner;
+  return [item.kind, item.status, owner ? `@${endpointLabel(owner)}` : ""].filter(Boolean).join(" · ");
+}
+
+function buildBoardItemKey(item: BuildBoardItem): string {
+  return `${item.kind}:${item.id}`;
+}
+
+function buildBoardColumnEmptyText(column: BuildBoardColumn): string {
+  switch (column.key) {
+    case "todo": return "No decision queued";
+    case "building": return "No active build";
+    case "review": return "No review item";
+    case "validate": return "No validation";
+    case "done": return "No completed card";
+  }
+}
+
+function buildBoardColumnLabel(column: BuildBoardColumn): string {
+  switch (column.key) {
+    case "todo": return "Decide";
+    case "building": return "Building";
+    case "review": return "Review";
+    case "validate": return "Validate";
+    case "done": return "Done";
+  }
+}
+
+function projectHomeRoomLabel(session: SessionWorkProjection): string {
+  return roomLabelFromUri(session.origin?.channel);
+}
+
+function roomLabelFromUri(uri?: EndpointUri): string {
+  if (!uri) return "No room linked";
+  const channel = channels.value.find((item) => item.uri === uri);
+  if (channel) return channelLabel(channel);
+  const label = endpointLabel(uri);
+  return uri.includes("/dm/") ? `@ ${label}` : `# ${label}`;
+}
+
+function projectAttentionCount(session: SessionWorkProjection): number {
+  return reviewQueue.value.filter((item) => item.session_id === session.session_id).length;
+}
+
+function projectAttentionText(session: SessionWorkProjection): string {
+  const count = projectAttentionCount(session);
+  return count > 0 ? `${count} need you` : "No human action";
+}
+
+function projectArtifactText(session: SessionWorkProjection): string {
+  if (!session.latest_artifact) return "No artifact yet";
+  return `${session.latest_artifact.title || session.latest_artifact.kind} · ${session.latest_artifact.status}`;
+}
+
+function projectTone(session: SessionWorkProjection): "need" | "live" | "doc" | "done" | "plain" {
+  if (projectAttentionCount(session) > 0 || session.blockers.length > 0 || session.phase === "decision") return "need";
+  if (session.latest_artifact && session.phase === "review") return "doc";
+  if (session.phase === "execute" || session.phase === "handoff" || session.agents.some((agent) => agent.status === "running" || agent.status === "pending")) return "live";
+  if (session.phase === "done") return "done";
+  return "plain";
+}
+
+function projectToneClass(session: SessionWorkProjection): string {
+  const tone = projectTone(session);
+  return tone === "plain" ? "" : tone;
+}
+
+function reviewTone(kind: ReviewQueueItemKind): "need" | "doc" | "observe" | "plain" {
+  if (kind === "artifact") return "doc";
+  if (kind === "validation") return "observe";
+  if (kind === "approval" || kind === "question" || kind === "decision") return "need";
+  return "plain";
+}
+
+function reviewToneClass(kind: ReviewQueueItemKind): string {
+  const tone = reviewTone(kind);
+  return tone === "plain" ? "" : tone;
+}
+
+function cardOwnerLabel(item: BuildBoardItem): string {
+  return item.agent ? `@${endpointLabel(item.agent)}` : item.owner ? endpointLabel(item.owner) : item.kind;
+}
+
+function workCardTone(item: BuildBoardItem): "need" | "live" | "doc" | "observe" | "done" | "plain" {
+  if (item.kind === "approval" || item.status === "pending" || item.status === "revision_requested") return "need";
+  if (item.kind === "artifact") return "doc";
+  if (item.kind === "validation") return "observe";
+  if (item.status === "accepted" || item.status === "passed" || item.status === "completed") return "done";
+  if (item.kind === "delegation" || item.status === "running") return "live";
+  return "plain";
+}
+
+function workCardToneClass(item: BuildBoardItem): string {
+  const tone = workCardTone(item);
+  return tone === "plain" ? "" : tone;
+}
+
+function agentRowState(agent: EndpointUri): string {
+  const row = agentActivityRows.value.find((item) => item.source === agent);
+  if (row?.rowType === "agent-status") return agentStatusVisualState(row);
+  if (row?.rowType === "tool") return row.state;
+  const workload = agentWorkload.value.find((item) => item.agent === agent);
+  if (workload?.blockers.length) return "blocked";
+  return workload?.sessions.length ? "assigned" : "idle";
+}
+
+function agentLatestIpc(agent: EndpointUri): string {
+  const workload = agentWorkload.value.find((item) => item.agent === agent);
+  const latest = workload?.latest_tool_call;
+  if (latest) return toolCallLabel(latest);
+  const row = agentActivityRows.value.find((item) => item.source === agent);
+  if (!row) return "No IPC activity";
+  return row.rowType === "tool" ? `${toolOperation(row)} ${row.preview}` : row.text;
+}
+
+function buildBoardWriteOperationLabel(operation: ToolCallSummary): string {
+  return `${endpointLabel(operation.endpoint)} ${operation.action}`;
+}
+
+function openBuildBoardItem(session: SessionWorkProjection, item: BuildBoardItem): void {
+  void openSessionDetail(session, { kind: item.kind, id: item.id });
+}
+
+function selectBuildBoardItem(item: BuildBoardItem): void {
+  selectInspector(item.kind, item.id);
+}
+
 function lifecycleColumns(detail: SessionDetailProjection | null): LifecycleColumn[] {
   if (!detail) return [];
   const columns: LifecycleColumn[] = [
@@ -1070,7 +1353,7 @@ function lifecycleColumns(detail: SessionDetailProjection | null): LifecycleColu
       phase: "intake",
       label: "Intake",
       items: [
-        { kind: "session", id: detail.session.session_id, title: detail.session.title, meta: detail.session.objective || "Session boundary", status: detail.session.status },
+        { kind: "session", id: detail.session.session_id, title: detail.session.title, meta: detail.session.objective || "Project boundary", status: detail.session.status },
         ...detail.constraints.map((item) => ({ kind: "constraint" as const, id: item.id, title: "Constraint", meta: compactText(item.constraint), status: "recorded" })),
       ],
     },
@@ -1120,7 +1403,7 @@ function resolveInspectorObject(ref: InspectorRef): InspectorObject | null {
     return {
       ref: { kind: "session", id: session.session_id },
       title: session.title,
-      eyebrow: "Session",
+      eyebrow: "Project",
       status: session.status,
       summary: session.objective || session.phase_reason,
       payload: session,
@@ -1214,7 +1497,7 @@ function sourceRefLabel(ref: SourceRef): string {
 }
 
 function traceRefLabel(ref: TraceRef): string {
-  const endpoint = ref.endpoint ? endpointLabel(ref.endpoint) : "trace";
+  const endpoint = ref.endpoint ? endpointLabel(ref.endpoint) : "observe";
   return [ref.label, endpoint, ref.action].filter(Boolean).join(" · ");
 }
 
@@ -1247,7 +1530,7 @@ function finalReportTitle(message: SlockMessage): string {
 }
 
 function finalReportMeta(message: SlockMessage): string {
-  return `session final · ${messageTime(message.created_at)}`;
+  return `${projectionProjectLabel(message)} · final synthesis · ${messageTime(message.created_at)}`;
 }
 
 function artifactProjectionTitle(message: SlockMessage): string {
@@ -1256,7 +1539,30 @@ function artifactProjectionTitle(message: SlockMessage): string {
 
 function artifactProjectionMeta(message: SlockMessage): string {
   const author = message.projection?.author ?? message.sender;
-  return `artifact · @${endpointLabel(author)} · ${messageTime(message.created_at)}`;
+  return `${projectionProjectLabel(message)} · artifact · @${endpointLabel(author)} · ${messageTime(message.created_at)}`;
+}
+
+function projectionSummaryText(message: SlockMessage): string {
+  const fallback = isFinalReportMessage(message) ? "Final synthesis is ready." : "Submitted an artifact.";
+  return compactPreviewText(message.text, fallback, 320);
+}
+
+function projectionAttachmentTitle(message: SlockMessage): string {
+  return isFinalReportMessage(message) ? finalReportTitle(message) : artifactProjectionTitle(message);
+}
+
+function projectionAttachmentMeta(message: SlockMessage): string {
+  return isFinalReportMessage(message) ? finalReportMeta(message) : artifactProjectionMeta(message);
+}
+
+function projectionAttachmentKind(message: SlockMessage): string {
+  return isFinalReportMessage(message) ? "Final synthesis" : "Artifact";
+}
+
+function projectionProjectLabel(message: SlockMessage): string {
+  const sessionId = message.projection?.session_id;
+  if (!sessionId) return "Project";
+  return workSessions.value.find((session) => session.session_id === sessionId)?.title ?? `Project ${sessionId}`;
 }
 
 function canOpenArtifactProjection(message: SlockMessage): boolean {
@@ -1476,8 +1782,14 @@ function removeRow(id: string): void {
   rows.value = rows.value.filter((row) => row.id !== id);
 }
 
-function streamKey(delta: SlockMessageDelta): string {
+function streamKey(delta: Pick<SlockMessageDelta, "source" | "thread_id">): string {
   return "stream:" + delta.source + ":" + delta.thread_id;
+}
+
+function removeStreamRow(delta: Pick<SlockMessageDelta, "source" | "thread_id">): void {
+  const id = streamKey(delta);
+  streamRows.delete(id);
+  removeRow(id);
 }
 
 function statusKeyFromParts(source: EndpointUri, threadId: string): string {
@@ -1869,6 +2181,7 @@ function renderAgentRunStarted(run: SlockAgentRunEvent): void {
 
 function renderAgentRunFinished(run: SlockAgentRunEvent): void {
   rememberAgent(run.agent);
+  removeStreamRow({ source: run.agent, thread_id: run.message_id });
   const receivedAt = run.finished_at ?? new Date().toISOString();
   const state = run.state === "started" ? "running" : run.state;
   const text = agentRunText(run);
@@ -2038,17 +2351,20 @@ function renderDelta(delta: SlockMessageDelta): void {
     return;
   }
 
-  const id = streamKey(delta);
-  let row = streamRows.get(id);
-  if (!row) {
-    row = appendSimpleRow("delta", delta.source, delta.text, id);
-    if (!row) return;
-    if (delta.thread_id) row.threadReply = true;
-    streamRows.set(id, row);
-    return;
-  }
-
-  row.text += delta.text;
+  removeStreamRow(delta);
+  const receivedAt = new Date().toISOString();
+  ensureAgentStatusRow({
+    channel: activeChannel.value?.uri,
+    source: delta.source,
+    threadId: delta.thread_id,
+    threadReply: Boolean(delta.thread_id),
+    messageId: delta.thread_id,
+    receivedAt,
+    lastActivityAt: receivedAt,
+    state: "streaming",
+    text: "Drafting response.",
+    synthetic: true,
+  });
   scrollTimeline();
 }
 
@@ -2268,7 +2584,7 @@ async function reopenSelectedSession(): Promise<void> {
 async function requestSelectedSynthesis(): Promise<void> {
   const session = detailSession.value;
   if (!session) return;
-  await postSessionAction(`/api/sessions/${encodeURIComponent(session.session_id)}/synthesis`, { reason: "User requested final synthesis from Session Detail" }, `synthesis:${session.session_id}`);
+  await postSessionAction(`/api/sessions/${encodeURIComponent(session.session_id)}/synthesis`, { reason: "User requested final synthesis from Project Detail" }, `synthesis:${session.session_id}`);
 }
 
 async function reviewArtifact(sessionId: string, artifactId: string, status: "accepted" | "rejected" | "revision_requested"): Promise<void> {
@@ -2740,1328 +3056,447 @@ function errorMessage(error: unknown): string {
 </script>
 
 <template>
-  <main class="app-shell">
-    <aside class="navigation-rail" aria-label="Workspace navigation">
-      <div class="brand-lockup">
-        <span class="brand-glyph" aria-hidden="true"><MessageSquare :size="18" /></span>
-        <span class="brand-copy">
-          <span class="brand-name">Kairos</span>
-          <span class="brand-caption">Slock bridge</span>
-        </span>
+  <main class="atlas-app" :aria-label="workspaceAriaLabel">
+    <aside class="rail" aria-label="Workspace navigation">
+      <div class="brand">
+        <div class="brand-mark">K</div>
+        <span>Kairos IPC</span>
       </div>
 
-      <section class="nav-section" aria-label="Sessions">
-        <div class="nav-heading">
-          <span>Sessions</span>
-          <span>{{ workSessions.length }}</span>
-        </div>
-        <div class="nav-list">
-          <button
-            class="nav-item"
-            :class="{ active: activeView === 'sessions' }"
-            type="button"
-            @click="showSessions"
-          >
-            <Activity :size="16" aria-hidden="true" />
-            <span>Work Dashboard</span>
-          </button>
-        </div>
-      </section>
+      <div class="nav-group">
+        <div class="nav-label">Navigate</div>
+        <button class="nav-item" :class="{ active: activeView === 'sessions' || activeView === 'session' || activeView === 'review' }" type="button" @click="showSessions">
+          <strong><span class="dot live"></span>Projects</strong>
+          <span class="nav-count">{{ workSessions.length }}</span>
+        </button>
+        <button class="nav-item" :class="{ active: activeView === 'chat' }" type="button" @click="showChat">
+          <strong><span class="dot doc"></span>Rooms</strong>
+          <span class="nav-count">{{ channels.length }}</span>
+        </button>
+        <button class="nav-item" :class="{ active: activeView === 'agent' }" type="button" @click="showAgents">
+          <strong><span class="dot live"></span>Agents</strong>
+          <span class="nav-count">{{ knownAgents.length }}</span>
+        </button>
+        <button class="nav-item" :class="{ active: activeView === 'trace' }" type="button" @click="openTraceViewer">
+          <strong><span class="dot observe"></span>Observe</strong>
+          <span class="nav-count">trace</span>
+        </button>
+      </div>
 
-      <section class="nav-section" aria-label="Review">
-        <div class="nav-heading">
-          <span>Review</span>
-          <span>{{ reviewQueue.length }}</span>
-        </div>
-        <div class="nav-list">
-          <button
-            class="nav-item"
-            :class="{ active: activeView === 'review' }"
-            type="button"
-            @click="showReviewQueue"
-          >
-            <ListChecks :size="16" aria-hidden="true" />
-            <span>Queue</span>
-          </button>
-        </div>
-      </section>
+      <div v-if="activeView === 'sessions' || activeView === 'session' || activeView === 'review'" class="nav-group">
+        <div class="nav-label">Project views</div>
+        <button class="nav-item" :class="{ active: activeView === 'sessions' }" type="button" @click="showSessions">
+          <strong>Dashboard</strong>
+          <span class="nav-count">now</span>
+        </button>
+        <button class="nav-item" :class="{ active: activeView === 'review' }" type="button" @click="showReviewQueue">
+          <strong><span class="dot need"></span>Needs you</strong>
+          <span class="nav-count">{{ pendingReviewItemCount }}</span>
+        </button>
+        <button
+          v-for="session in workSessions.slice(0, 5)"
+          :key="session.session_id"
+          class="nav-item project-nav-row"
+          :class="{ active: activeView === 'session' && selectedSessionId === session.session_id }"
+          type="button"
+          @click="openSessionDetail(session)"
+        >
+          <strong><span class="dot" :class="projectToneClass(session)"></span>{{ session.title }}</strong>
+          <span class="nav-count">{{ projectAttentionCount(session) || projectLaneLabelForSession(session) }}</span>
+        </button>
+      </div>
 
-      <section class="nav-section" aria-label="Rooms">
-        <div class="nav-heading">
-          <span>Rooms</span>
-          <span>{{ channels.length }}</span>
-        </div>
-        <div class="nav-list">
-          <button
-            v-for="channel in channels"
-            :key="channel.uri"
-            class="nav-item"
-            :class="{ active: activeView === 'chat' && activeChannel?.uri === channel.uri }"
-            type="button"
-            @click="switchChannel(channel.uri)"
-          >
-            <MessageSquare v-if="channel.kind !== 'dm'" :size="16" aria-hidden="true" />
-            <Bot v-else :size="16" aria-hidden="true" />
-            <span>{{ channelLabel(channel) }}</span>
-          </button>
-        </div>
-      </section>
+      <div v-if="activeView === 'chat'" class="nav-group">
+        <div class="nav-label">Rooms</div>
+        <button
+          v-for="channel in channels"
+          :key="channel.uri"
+          class="nav-item"
+          :class="{ active: activeChannel?.uri === channel.uri }"
+          type="button"
+          @click="switchChannel(channel.uri)"
+        >
+          <strong><span class="dot quiet"></span>{{ channelLabel(channel) }}</strong>
+          <span class="nav-count">room</span>
+        </button>
+      </div>
 
-      <section class="nav-section" aria-label="Agents">
-        <div class="nav-heading">
-          <span>Agents</span>
-          <span>{{ knownAgents.length }}</span>
-        </div>
-        <div v-if="knownAgents.length" class="nav-list">
-          <button
-            v-for="agent in knownAgents"
-            :key="agent"
-            class="nav-item"
-            :class="{ active: activeView === 'agent' && activeAgentUri === agent }"
-            type="button"
-            @click="openAgentDashboard(agent)"
-          >
-            <Bot :size="16" aria-hidden="true" />
-            <span>{{ agentLabel(agent) }}</span>
-          </button>
-        </div>
-        <div v-else class="nav-empty">Agents appear after a run starts.</div>
-      </section>
+      <div v-if="activeView === 'agent'" class="nav-group">
+        <div class="nav-label">Agents</div>
+        <button
+          v-for="agent in knownAgents"
+          :key="agent"
+          class="nav-item"
+          :class="{ active: activeAgentUri === agent }"
+          type="button"
+          @click="openAgentDashboard(agent)"
+        >
+          <strong><span class="dot live"></span>{{ agentLabel(agent) }}</strong>
+          <span class="nav-count">{{ agentRowState(agent) }}</span>
+        </button>
+        <div v-if="!knownAgents.length" class="nav-empty">Agents appear after a run starts.</div>
+      </div>
 
-      <section class="nav-section nav-section-bottom" aria-label="Observe">
-        <div class="nav-heading">
-          <span>Observe</span>
-        </div>
-        <div class="nav-list">
-          <button
-            class="nav-item"
-            :class="{ active: activeView === 'trace' }"
-            type="button"
-            @click="openTraceViewer"
-          >
-            <Activity :size="16" aria-hidden="true" />
-            <span>Trace</span>
-          </button>
-        </div>
-      </section>
+      <div v-if="activeView === 'trace'" class="nav-group">
+        <div class="nav-label">Observe</div>
+        <button class="nav-item active" type="button" @click="refreshTrace"><strong>Runtime audit</strong><span class="nav-count">now</span></button>
+        <button class="nav-item" type="button" @click="traceQuery = ''; refreshTrace()"><strong>Trace timeline</strong><span class="nav-count">{{ traceState.stats.total_events }}</span></button>
+        <button class="nav-item" type="button" @click="traceQuery = 'rejected'; refreshTrace()"><strong><span class="dot bad"></span>Failures</strong><span class="nav-count">{{ traceIssueCount }}</span></button>
+      </div>
     </aside>
 
-    <section class="workspace" :aria-label="activeView === 'sessions' ? 'Work dashboard' : activeView === 'session' ? 'Session detail' : activeView === 'review' ? 'Review queue' : activeView === 'agent' ? 'Agent dashboard' : activeView === 'trace' ? 'Trace viewer' : 'Channel'">
+    <section class="main">
       <header class="topbar">
-        <div class="workspace-heading">
-          <p class="workspace-kicker">{{ activeView === 'sessions' ? 'Sessions' : activeView === 'session' ? 'Session' : activeView === 'review' ? 'Review' : activeView === 'chat' ? 'Room' : activeView === 'agent' ? 'Agent' : 'Observe' }}</p>
-          <h1>{{ workspaceTitle }}</h1>
-          <p>{{ workspaceStatus }}</p>
+        <nav class="mobile-nav" aria-label="Primary navigation">
+          <button class="mobile-nav-item" :class="{ active: activeView === 'sessions' || activeView === 'session' || activeView === 'review' }" type="button" @click="showSessions">Projects</button>
+          <button class="mobile-nav-item" :class="{ active: activeView === 'chat' }" type="button" @click="showChat">Rooms</button>
+          <button class="mobile-nav-item" :class="{ active: activeView === 'agent' }" type="button" @click="showAgents">Agents</button>
+          <button class="mobile-nav-item" :class="{ active: activeView === 'trace' }" type="button" @click="openTraceViewer">Observe</button>
+        </nav>
+        <div class="top-row">
+          <div class="title">
+            <h1>{{ workspaceTitle }}</h1>
+            <p>{{ workspaceStatus }}</p>
+          </div>
+          <div class="toolbar">
+            <button v-if="activeView === 'sessions'" class="button-tonal" type="button" :disabled="sessionsLoading" @click="loadSessions">Refresh</button>
+            <button v-if="activeView === 'session'" class="button-tonal" type="button" :disabled="sessionDetailLoading || !selectedSessionId" @click="selectedSessionId && loadSessionDetail(selectedSessionId)">Refresh</button>
+            <button v-if="activeView === 'review'" class="button-tonal" type="button" :disabled="sessionsLoading" @click="loadDashboard">Refresh</button>
+            <button v-if="activeView === 'chat'" class="button-tonal" type="button" @click="refreshHistory">Refresh</button>
+            <button v-if="activeView === 'trace'" class="button" type="button" :disabled="traceState.loading" @click="refreshTrace">Refresh</button>
+            <button v-if="activeView === 'session' && detailSession?.status === 'open'" class="button-text" type="button" :disabled="!detailSession || actionPending('close:' + detailSession.session_id)" @click="closeSelectedSession('completed')">Close</button>
+            <button v-if="activeView === 'session' && detailSession?.status !== 'open'" class="button-text" type="button" :disabled="!detailSession || actionPending('reopen:' + detailSession.session_id)" @click="reopenSelectedSession">Reopen</button>
+          </div>
         </div>
-        <div class="topbar-actions">
-          <button v-if="activeView === 'sessions'" class="ghost icon-label" type="button" :disabled="sessionsLoading" @click="loadSessions">
-            <RefreshCw :size="15" aria-hidden="true" />
-            <span>Refresh</span>
-          </button>
-          <template v-else-if="activeView === 'session'">
-            <button class="ghost icon-label" type="button" :disabled="sessionDetailLoading || !selectedSessionId" @click="selectedSessionId && loadSessionDetail(selectedSessionId)">
-              <RefreshCw :size="15" aria-hidden="true" />
-              <span>Refresh</span>
-            </button>
-            <button v-if="detailSession?.status !== 'open'" class="ghost icon-label" type="button" :disabled="!detailSession || actionPending('reopen:' + detailSession.session_id)" @click="reopenSelectedSession">
-              <RotateCcw :size="15" aria-hidden="true" />
-              <span>Reopen</span>
-            </button>
-            <button v-else class="ghost icon-label" type="button" :disabled="!detailSession || actionPending('close:' + detailSession.session_id)" @click="closeSelectedSession('completed')">
-              <Archive :size="15" aria-hidden="true" />
-              <span>Close</span>
-            </button>
-          </template>
-          <button v-else-if="activeView === 'review'" class="ghost icon-label" type="button" :disabled="sessionsLoading" @click="loadDashboard">
-            <RefreshCw :size="15" aria-hidden="true" />
-            <span>Refresh</span>
-          </button>
-          <button v-else-if="activeView === 'chat'" class="ghost icon-label" type="button" @click="refreshHistory">
-            <RefreshCw :size="15" aria-hidden="true" />
-            <span>Refresh</span>
-          </button>
-          <button v-else-if="activeView === 'trace'" class="ghost icon-label" type="button" :disabled="traceState.loading" @click="refreshTrace">
-            <RefreshCw :size="15" aria-hidden="true" />
-            <span>Refresh</span>
-          </button>
-          <button v-else class="ghost icon-label" type="button" @click="showChat">
-            <MessageSquare :size="15" aria-hidden="true" />
-            <span>Channel</span>
-          </button>
+
+        <div v-if="activeView === 'sessions' || activeView === 'review'" class="tabs">
+          <button class="tab" :class="{ active: activeView === 'sessions' }" type="button" role="tab" @click="showSessions">Dashboard</button>
+          <button class="tab need" :class="{ active: activeView === 'review' }" type="button" @click="showReviewQueue">Needs you {{ pendingReviewItemCount }}</button>
+          <span class="tab">Active {{ activeWorkSessionCount }}</span>
+          <span class="tab doc">Artifacts {{ readyArtifactProjectCount }}</span>
+          <span class="tab">Done {{ recentlyConsumedProjects.length }}</span>
+        </div>
+        <div v-else-if="activeView === 'session'" class="tabs">
+          <button class="tab" :class="{ active: sessionDetailTab === 'work' }" type="button" @click="sessionDetailTab = 'work'">Board</button>
+          <button class="tab need" type="button" @click="showReviewQueue">Needs you {{ projectDetailNeeds.length }}</button>
+          <button class="tab doc" :class="{ active: sessionDetailTab === 'inspector' && artifactReaderObject }" type="button" @click="openSessionArtifacts">Artifacts {{ detailObjectCounts.artifacts }}</button>
+          <button class="tab" type="button" @click="sessionDetailTab = 'reports'">Rooms {{ projectDetailNotes.length }}</button>
+          <button class="tab observe" type="button" @click="openTraceViewer">Observe</button>
+        </div>
+        <div v-else-if="activeView === 'chat'" class="tabs">
+          <span class="tab active">Chat</span>
+          <span class="tab need">Project cards {{ roomProjectCards.length }}</span>
+          <span class="tab">Attach</span>
+        </div>
+        <div v-else-if="activeView === 'agent'" class="tabs">
+          <span class="tab active">Workload</span>
+          <span class="tab">Capabilities</span>
+          <span class="tab">Health</span>
+          <span class="tab observe">Services</span>
+        </div>
+        <div v-else-if="activeView === 'trace'" class="tabs">
+          <span class="tab active observe">Runtime audit</span>
+          <span class="tab">Trace timeline {{ traceState.stats.total_events }}</span>
+          <span class="tab">Endpoints</span>
+          <span class="tab bad">Failures {{ traceIssueCount }}</span>
         </div>
       </header>
 
-      <div v-if="activeView === 'sessions'" class="work-dashboard">
-        <div class="work-dashboard-toolbar">
-          <label class="dashboard-search">
-            <Search :size="15" aria-hidden="true" />
-            <input v-model="sessionSearch" type="search" :placeholder="sessionSearchPlaceholder()" />
-          </label>
-          <div class="phase-filter" aria-label="Session phase filter">
-            <button
-              v-for="item in sessionPhaseFilters"
-              :key="item.phase"
-              class="phase-filter-item"
-              :class="{ active: sessionPhaseFilter === item.phase }"
-              type="button"
-              @click="sessionPhaseFilter = item.phase"
-            >
-              <span>{{ item.label }}</span>
-              <span>{{ item.count }}</span>
-            </button>
-          </div>
-        </div>
+      <section v-if="activeView === 'sessions'" class="content two-col">
+        <div class="stack">
+          <article v-if="attentionPreviewItems.length" class="banner">
+            <div>
+              <strong>{{ pendingReviewItemCount }} {{ pendingReviewItemCount === 1 ? 'item needs' : 'items need' }} you before agents can continue.</strong>
+              <p>Approvals, questions, validations, and artifact reviews live on Projects. Handled items recede from this surface.</p>
+            </div>
+            <div class="actions"><button class="mini human" type="button" @click="showReviewQueue">Open Needs You</button></div>
+          </article>
 
-        <div class="dashboard-metrics" aria-label="Work dashboard summary">
-          <div class="dashboard-metric">
-            <span>Active</span>
-            <strong>{{ activeWorkSessionCount }}</strong>
-          </div>
-          <div class="dashboard-metric">
-            <span>Waiting</span>
-            <strong>{{ pendingReviewItemCount }}</strong>
-          </div>
-          <div class="dashboard-metric">
-            <span>Blocked</span>
-            <strong>{{ blockedWorkSessionCount }}</strong>
-          </div>
-          <div class="dashboard-metric">
-            <span>Agents</span>
-            <strong>{{ runningDashboardAgentCount }}</strong>
-          </div>
-        </div>
+          <div v-if="sessionsError" class="banner bad"><div><strong>Project dashboard error</strong><p>{{ sessionsError }}</p></div><button class="mini soft" type="button" @click="loadDashboard">Retry</button></div>
+          <div v-else-if="sessionsLoading && !workSessions.length" class="panel"><h3>Loading projects</h3><p>Project projections will appear here after the dashboard snapshot loads.</p></div>
+          <div v-else-if="!workSessions.length" class="panel empty-panel"><h3>No projects yet</h3><p>Start from a room mention. Durable Project cards, artifacts, and approvals will appear here.</p><button class="mini primary" type="button" @click="showChat">Open room</button></div>
 
-        <div v-if="dashboardIsStale" class="dashboard-stale">
-          <ShieldAlert :size="16" aria-hidden="true" />
-          <span>Dashboard has not received session updates for more than two minutes.</span>
-          <button class="subtle-button" type="button" @click="loadDashboard">Retry</button>
-        </div>
-
-        <div v-if="sessionsError" class="dashboard-error">
-          <ShieldAlert :size="16" aria-hidden="true" />
-          <span>{{ sessionsError }}</span>
-        </div>
-
-        <div v-if="sessionsLoading && !workSessions.length" class="session-skeleton-list" aria-label="Loading sessions">
-          <div v-for="index in 4" :key="index" class="session-skeleton-row"></div>
-        </div>
-
-        <div v-else-if="!workSessions.length" class="dashboard-empty">
-          <div class="dashboard-empty-title">No work sessions</div>
-          <div class="dashboard-empty-text">Session state will appear after a real collaboration session is created.</div>
-          <button class="ghost icon-label" type="button" @click="showChat">
-            <MessageSquare :size="15" aria-hidden="true" />
-            <span>Open room</span>
-          </button>
-        </div>
-
-        <div v-else-if="!visibleWorkSessions.length" class="dashboard-empty compact-empty">
-          <div class="dashboard-empty-title">No matching sessions</div>
-          <div class="dashboard-empty-text">Adjust the search or phase filter.</div>
-        </div>
-
-        <div v-else class="work-dashboard-layout">
-          <section class="session-board" aria-label="Work sessions by lifecycle phase">
-            <section v-for="column in sessionBoardColumns" :key="column.phase" class="session-column" :data-phase="column.phase">
-              <header class="session-column-header">
-                <span class="work-phase" :data-phase="column.phase">{{ column.label }}</span>
-                <span>{{ column.sessions.length }}</span>
-              </header>
-
-              <article
-                v-for="session in column.sessions"
-                :key="session.session_id"
-                class="session-work-card"
-                :class="{ selected: selectedSession?.session_id === session.session_id }"
-                :data-phase="sessionPhaseClass(session)"
-                :data-stale="sessionIsStale(session)"
-              >
-                <button class="session-work-card-main" type="button" @click="selectSession(session.session_id)">
-                  <span class="session-card-topline">
-                    <strong>{{ session.title }}</strong>
-                    <span>{{ sessionIsStale(session) ? 'stale' : sessionUpdatedAt(session) }}</span>
-                  </span>
-                  <span class="session-card-summary">{{ sessionPrimaryText(session) }}</span>
-                  <span v-if="session.agents.length" class="session-agent-list" aria-label="Assigned agents">
-                    <span v-for="agent in visibleAgents(session)" :key="agent.delegation_id" class="session-agent-chip" :data-state="agent.status">
-                      @{{ endpointLabel(agent.agent) }} {{ agentRoleText(agent) }}
-                    </span>
-                    <span v-if="remainingAgentCount(session)" class="session-agent-chip muted">+{{ remainingAgentCount(session) }}</span>
-                  </span>
-                  <span class="session-card-current">{{ sessionSignalText(session) }}</span>
-                  <span class="session-card-blockers" :data-empty="session.blockers.length === 0">{{ sessionBlockerSummary(session) }}</span>
-                </button>
-
-                <div class="session-card-actions" aria-label="Session actions">
-                  <button class="icon-button" type="button" title="Open session detail" @click="openSessionDetail(session)">
-                    <ChevronRight :size="15" aria-hidden="true" />
-                  </button>
-                  <button
-                    v-for="action in sessionRunnableActions(session)"
-                    :key="action.kind + ':' + action.target"
-                    class="icon-button"
-                    type="button"
-                    :title="action.label"
-                    @click="sessionAction(session, action)"
-                  >
-                    <MessageSquare v-if="action.kind === 'open_thread'" :size="15" aria-hidden="true" />
-                    <Activity v-else :size="15" aria-hidden="true" />
-                  </button>
-                </div>
-              </article>
-            </section>
+          <section v-else class="project-grid" aria-label="Active projects">
+            <article v-for="session in visibleWorkSessions.slice(0, 9)" :key="session.session_id" class="project-card" :class="projectToneClass(session)">
+              <button class="card-button" type="button" @click="openSessionDetail(session)">
+                <span class="card-top project-card-head project-card-head--compact">
+                  <span class="project-card-head-title"><span>Project</span><strong>{{ session.title }}</strong></span>
+                  <span class="chip" :class="projectToneClass(session)">{{ projectLaneLabelForSession(session) }}</span>
+                </span>
+                <p class="project-signal-preview project-signal-preview--digest">
+                  <span>{{ session.latest_artifact ? 'Latest artifact' : 'Current work' }}</span>
+                  <strong>{{ sessionSignalText(session) }}</strong>
+                </p>
+                <span class="meta"><span>{{ projectHomeRoomLabel(session) }}</span><span>{{ projectAttentionText(session) }}</span></span>
+                <span class="tiny-progress"><span :style="{ width: session.phase === 'done' ? '100%' : projectBoardLane(session) === 'validate' ? '78%' : projectBoardLane(session) === 'review' ? '62%' : projectBoardLane(session) === 'building' ? '42%' : '18%' }"></span></span>
+              </button>
+            </article>
           </section>
 
-          <aside v-if="selectedSession" class="session-inspector" aria-label="Selected session">
-            <div class="session-inspector-header">
-              <span class="work-phase" :data-phase="sessionPhaseClass(selectedSession)">{{ selectedSession.phase_label }}</span>
-              <h2>{{ selectedSession.title }}</h2>
-              <p>{{ selectedSession.phase_reason || selectedSession.status }}</p>
-            </div>
-
-            <div class="session-inspector-section">
-              <span class="session-section-label">Owner</span>
-              <strong>{{ sessionOwnerLabel(selectedSession) }}</strong>
-            </div>
-
-            <div v-if="selectedSession.acceptance_criteria?.length" class="session-inspector-section">
-              <span class="session-section-label">Acceptance</span>
-              <ul class="inspector-list">
-                <li v-for="criterion in selectedSession.acceptance_criteria" :key="criterion">{{ criterion }}</li>
-              </ul>
-            </div>
-
-            <div class="session-inspector-section">
-              <span class="session-section-label">Agents</span>
-              <div v-if="selectedSession.agents.length" class="inspector-agent-list">
-                <div v-for="agent in selectedSession.agents" :key="agent.delegation_id" class="inspector-agent-row">
-                  <span>@{{ endpointLabel(agent.agent) }}</span>
-                  <strong>{{ delegationStatusLabel(agent.status) }}</strong>
-                  <small>{{ agent.current_work || agentWorkloadForSession(selectedSession, agent.agent)?.current_work || agentRoleText(agent) }}</small>
-                </div>
-              </div>
-              <p v-else class="dashboard-muted">No active delegation</p>
-            </div>
-
-            <div v-if="selectedSession.latest_report" class="session-inspector-section">
-              <span class="session-section-label">Latest Report</span>
-              <p>{{ selectedSession.latest_report }}</p>
-            </div>
-
-            <div v-if="selectedSession.blockers.length" class="session-inspector-section">
-              <span class="session-section-label">Blockers</span>
-              <div class="session-blockers">
-                <span v-for="blocker in selectedSession.blockers" :key="blocker.kind + ':' + blocker.ref_id" class="session-blocker">{{ blocker.label }}</span>
-              </div>
-            </div>
-
-            <div v-if="selectedSessionReviews.length" class="session-inspector-section">
-              <span class="session-section-label">Review Queue</span>
-              <div class="inspector-review-list">
-                <div v-for="item in selectedSessionReviews" :key="item.id" class="inspector-review-row">
-                  <strong>{{ item.required_action }}</strong>
-                  <span>{{ item.title }}</span>
-                </div>
-              </div>
-            </div>
-
-            <div class="session-inspector-section">
-              <span class="session-section-label">Latest Tool</span>
-              <p>{{ toolCallLabel(selectedAgentWorkload[0]?.latest_tool_call || selectedSession.agents.find((agent) => agent.latest_tool_call)?.latest_tool_call) }}</p>
-            </div>
-
-            <div v-if="sessionWorkflowActions(selectedSession).length" class="session-inspector-section">
-              <span class="session-section-label">Pending Actions</span>
-              <div class="inspector-action-list">
-                <span v-for="action in sessionWorkflowActions(selectedSession)" :key="action.kind + ':' + action.target">{{ action.label }}</span>
-              </div>
-            </div>
-
-            <div class="session-inspector-actions">
-              <button class="subtle-button icon-label" type="button" @click="openSessionDetail(selectedSession)">
-                <ChevronRight :size="14" aria-hidden="true" />
-                <span>Open detail</span>
-              </button>
-              <button class="subtle-button icon-label" type="button" @click="openSessionThread(selectedSession)">
-                <MessageSquare :size="14" aria-hidden="true" />
-                <span>Open thread</span>
-              </button>
-              <button class="subtle-button icon-label" type="button" @click="openSessionTrace(selectedSession)">
-                <Activity :size="14" aria-hidden="true" />
-                <span>Open trace</span>
-              </button>
-            </div>
-          </aside>
-        </div>
-      </div>
-
-      <div v-else-if="activeView === 'session'" class="session-detail-view">
-        <div class="session-detail-tabs" role="tablist" aria-label="Session detail sections">
-          <button type="button" role="tab" :aria-selected="sessionDetailTab === 'work'" :class="{ active: sessionDetailTab === 'work' }" @click="sessionDetailTab = 'work'">Work</button>
-          <button type="button" role="tab" :aria-selected="sessionDetailTab === 'reports'" :class="{ active: sessionDetailTab === 'reports' }" @click="sessionDetailTab = 'reports'">Reports</button>
-          <button type="button" role="tab" :aria-selected="sessionDetailTab === 'inspector'" :class="{ active: sessionDetailTab === 'inspector' }" @click="sessionDetailTab = 'inspector'">Inspector</button>
-        </div>
-
-        <div v-if="sessionDetailError" class="dashboard-error">
-          <ShieldAlert :size="16" aria-hidden="true" />
-          <span>{{ sessionDetailError }}</span>
-          <button class="subtle-button" type="button" :disabled="!selectedSessionId" @click="selectedSessionId && loadSessionDetail(selectedSessionId)">Retry</button>
-        </div>
-
-        <div v-if="sessionDetailIsStale" class="dashboard-stale">
-          <ShieldAlert :size="16" aria-hidden="true" />
-          <span>Session detail has not refreshed for more than two minutes.</span>
-          <button class="subtle-button" type="button" :disabled="!selectedSessionId" @click="selectedSessionId && loadSessionDetail(selectedSessionId)">Refresh</button>
-        </div>
-
-        <div v-if="sessionDetailLoading && !sessionDetail" class="session-detail-skeleton">
-          <div class="session-skeleton-row"></div>
-          <div class="session-skeleton-row"></div>
-          <div class="session-skeleton-row"></div>
-        </div>
-
-        <div v-else-if="!detailSession" class="dashboard-empty">
-          <div class="dashboard-empty-title">Session not found</div>
-          <div class="dashboard-empty-text">Return to the dashboard or open trace to inspect the raw IPC stream.</div>
-          <div class="session-inspector-actions">
-            <button class="ghost icon-label" type="button" @click="showSessions">
-              <Activity :size="15" aria-hidden="true" />
-              <span>Dashboard</span>
-            </button>
-            <button class="ghost icon-label" type="button" @click="openTraceViewer">
-              <TerminalSquare :size="15" aria-hidden="true" />
-              <span>Trace</span>
-            </button>
-          </div>
-        </div>
-
-        <div v-else class="session-detail-layout">
-          <section class="session-detail-work" :class="{ active: sessionDetailTab === 'work' }" aria-label="Session work canvas">
-            <header class="session-detail-header">
-              <div>
-                <span class="work-phase" :data-phase="sessionPhaseClass(detailSession)">{{ detailSession.phase_label }}</span>
-                <h2>{{ detailSession.title }}</h2>
-                <p>{{ detailSession.phase_reason || detailSession.status }}</p>
-              </div>
-              <div class="session-detail-actions">
-                <button class="subtle-button icon-label" type="button" :disabled="actionPending('synthesis:' + detailSession.session_id)" @click="requestSelectedSynthesis">
-                  <Check :size="14" aria-hidden="true" />
-                  <span>Synthesis</span>
-                </button>
-                <button v-if="detailSession.status === 'open'" class="subtle-button icon-label" type="button" :disabled="actionPending('close:' + detailSession.session_id)" @click="closeSelectedSession('completed')">
-                  <Archive :size="14" aria-hidden="true" />
-                  <span>Close</span>
-                </button>
-                <button v-else class="subtle-button icon-label" type="button" :disabled="actionPending('reopen:' + detailSession.session_id)" @click="reopenSelectedSession">
-                  <RotateCcw :size="14" aria-hidden="true" />
-                  <span>Reopen</span>
-                </button>
-              </div>
-            </header>
-
-            <section class="objective-panel">
-              <div>
-                <span class="session-section-label">Objective</span>
-                <p>{{ detailSession.objective || sessionPrimaryText(detailSession) }}</p>
-              </div>
-              <div>
-                <span class="session-section-label">Acceptance</span>
-                <ul v-if="detailSession.acceptance_criteria?.length" class="inspector-list">
-                  <li v-for="criterion in detailSession.acceptance_criteria" :key="criterion">{{ criterion }}</li>
-                </ul>
-                <p v-else class="dashboard-muted">No criteria recorded</p>
-              </div>
-              <div>
-                <span class="session-section-label">Counts</span>
-                <div class="detail-counts">
-                  <span>{{ detailObjectCounts.tasks }} tasks</span>
-                  <span>{{ detailObjectCounts.delegations }} delegations</span>
-                  <span>{{ detailObjectCounts.artifacts }} artifacts</span>
-                  <span>{{ detailObjectCounts.waiting }} waiting</span>
-                </div>
-              </div>
-            </section>
-
-            <section class="lifecycle-canvas" aria-label="Lifecycle projection">
-              <section v-for="column in detailLifecycleColumns" :key="column.phase" class="lifecycle-column" :data-phase="column.phase">
-                <header>
-                  <span class="work-phase" :data-phase="column.phase">{{ column.label }}</span>
-                  <span>{{ column.items.length }}</span>
-                </header>
-                <button
-                  v-for="item in column.items"
-                  :key="item.kind + ':' + item.id"
-                  class="lifecycle-object"
-                  :class="{ selected: selectedInspectorRef.kind === item.kind && selectedInspectorRef.id === item.id }"
-                  type="button"
-                  @click="selectInspector(item.kind, item.id)"
-                >
-                  <strong>{{ item.title }}</strong>
-                  <span>{{ item.meta }}</span>
-                  <small v-if="item.status">{{ item.status }}</small>
-                </button>
-              </section>
-            </section>
-
-            <section v-if="sessionDetail" class="detail-object-grid" aria-label="Session objects">
-              <div class="detail-panel">
-                <header><span>Tasks</span><span>{{ sessionDetail.tasks.length }}</span></header>
-                <button v-for="task in sessionDetail.tasks" :key="task.id" class="detail-object-row" type="button" @click="selectInspector('task', task.id)">
-                  <strong>{{ task.title }}</strong>
-                  <span>{{ task.status }} · {{ endpointLabel(task.owner) }}</span>
-                </button>
-                <p v-if="!sessionDetail.tasks.length" class="dashboard-muted">No tasks</p>
-              </div>
-
-              <div class="detail-panel">
-                <header><span>Delegations</span><span>{{ sessionDetail.delegations.length }}</span></header>
-                <button v-for="delegation in sessionDetail.delegations" :key="delegation.id" class="detail-object-row" type="button" @click="selectInspector('delegation', delegation.id)">
-                  <strong>@{{ endpointLabel(delegation.assignee) }}</strong>
-                  <span>{{ delegation.status }} · {{ delegation.role_label || delegation.role || delegation.instruction }}</span>
-                </button>
-                <p v-if="!sessionDetail.delegations.length" class="dashboard-muted">No delegations</p>
-              </div>
-
-              <div class="detail-panel wide">
-                <header><span>Artifacts</span><span>{{ sessionDetail.artifacts.length }}</span></header>
-                <article v-for="artifact in sessionDetail.artifacts" :key="artifact.id" class="artifact-review-row" :data-state="artifact.status">
-                  <button class="detail-object-row" type="button" @click="selectInspector('artifact', artifact.id)">
-                    <strong>{{ artifact.title || artifact.kind }}</strong>
-                    <span>{{ artifact.status }} · @{{ endpointLabel(artifact.author) }}</span>
+          <section v-if="visibleWorkSessions.length" class="board-shell" aria-label="Scrum board overview">
+            <div class="section-head"><h3>Scrum board</h3><span>Project state, not room ownership.</span></div>
+            <div class="board">
+              <div v-for="column in projectBoardColumns" :key="column.lane" class="column">
+                <div class="column-head"><strong>{{ column.label }}</strong><span>{{ column.projects.length }}</span></div>
+                <article v-for="session in column.projects.slice(0, 4)" :key="session.session_id" class="work-card" :class="projectToneClass(session)">
+                  <button class="card-button" type="button" @click="openSessionDetail(session)">
+                    <span class="card-top"><strong>{{ session.title }}</strong><span class="chip" :class="projectToneClass(session)">{{ projectAttentionCount(session) ? 'you' : projectLaneLabelForSession(session) }}</span></span>
+                    <p>{{ sessionPrimaryText(session) }}</p>
+                    <span class="meta"><span>{{ visibleAgents(session).map((agent) => '@' + endpointLabel(agent.agent)).join(', ') || sessionOwnerLabel(session) }}</span></span>
                   </button>
-                  <div v-if="artifact.status === 'submitted' || artifact.status === 'revision_requested'" class="inline-action-bar">
-                    <input v-model="actionNotes['artifact:' + artifact.id]" type="text" placeholder="Review note" :aria-label="'Review note for ' + (artifact.title || artifact.kind)" />
-                    <button type="button" :disabled="actionPending('artifact:' + artifact.id + ':accepted')" @click="reviewArtifact(detailSession.session_id, artifact.id, 'accepted')">Accept</button>
-                    <button type="button" :disabled="actionPending('artifact:' + artifact.id + ':revision_requested')" @click="reviewArtifact(detailSession.session_id, artifact.id, 'revision_requested')">Revise</button>
-                    <button type="button" :disabled="actionPending('artifact:' + artifact.id + ':rejected')" @click="reviewArtifact(detailSession.session_id, artifact.id, 'rejected')">Reject</button>
-                  </div>
-                </article>
-                <p v-if="!sessionDetail.artifacts.length" class="dashboard-muted">No artifacts</p>
-              </div>
-
-              <div class="detail-panel">
-                <header><span>Barriers</span><span>{{ sessionDetail.barriers.length }}</span></header>
-                <button v-for="barrier in sessionDetail.barriers" :key="barrier.id" class="detail-object-row" type="button" @click="selectInspector('barrier', barrier.id)">
-                  <strong>{{ barrier.synthesis_requested ? 'Synthesis barrier' : 'Reply barrier' }}</strong>
-                  <span>{{ barrier.status }} · {{ barrier.expected_from.map(endpointLabel).join(', ') }}</span>
-                </button>
-                <p v-if="!sessionDetail.barriers.length" class="dashboard-muted">No barriers</p>
-              </div>
-
-              <div class="detail-panel">
-                <header><span>Decisions</span><span>{{ sessionDetail.decisions.length }}</span></header>
-                <button v-for="decision in sessionDetail.decisions" :key="decision.id" class="detail-object-row" type="button" @click="selectInspector('decision', decision.id)">
-                  <strong>{{ endpointLabel(decision.decider) }}</strong>
-                  <span>{{ objectPreview(decision.decision) }}</span>
-                </button>
-                <p v-if="!sessionDetail.decisions.length" class="dashboard-muted">No decisions</p>
-              </div>
-
-              <div class="detail-panel wide">
-                <header><span>Approvals and Validations</span><span>{{ sessionDetail.approvals.length + sessionDetail.validations.length }}</span></header>
-                <article v-for="approval in sessionDetail.approvals" :key="approval.id" class="artifact-review-row" :data-state="approval.status">
-                  <button class="detail-object-row" type="button" @click="selectInspector('approval', approval.id)">
-                    <strong>{{ endpointLabel(approval.tool_endpoint) }} {{ approval.action }}</strong>
-                    <span>{{ approval.status }} · {{ approval.payload_summary }}</span>
-                  </button>
-                  <div v-if="approval.status === 'pending'" class="inline-action-bar">
-                    <input v-model="actionNotes['approval:' + approval.id]" type="text" placeholder="Resolution note" :aria-label="'Resolution note for ' + approval.action" />
-                    <button type="button" :disabled="actionPending('approval:' + approval.id + ':approved')" @click="resolveSessionApproval(detailSession.session_id, approval.id, true)">Approve</button>
-                    <button type="button" :disabled="actionPending('approval:' + approval.id + ':rejected')" @click="resolveSessionApproval(detailSession.session_id, approval.id, false)">Reject</button>
-                  </div>
-                </article>
-                <article v-for="validation in sessionDetail.validations" :key="validation.id" class="artifact-review-row" :data-state="validation.status">
-                  <button class="detail-object-row" type="button" @click="selectInspector('validation', validation.id)">
-                    <strong>{{ validation.summary || 'Validation' }}</strong>
-                    <span>{{ validation.status }} · {{ validation.artifact_id || validation.task_id || endpointLabel(validation.requester) }}</span>
-                  </button>
-                  <div v-if="validation.status === 'requested' || validation.status === 'failed'" class="inline-action-bar">
-                    <input v-model="actionNotes['validation:' + validation.id]" type="text" placeholder="Validation summary" :aria-label="'Validation summary for ' + (validation.summary || validation.id)" />
-                    <button type="button" :disabled="actionPending('validation:' + validation.id + ':passed')" @click="recordValidation(detailSession.session_id, validation.id, 'passed')">Pass</button>
-                    <button type="button" :disabled="actionPending('validation:' + validation.id + ':failed')" @click="recordValidation(detailSession.session_id, validation.id, 'failed')">Fail</button>
-                  </div>
                 </article>
               </div>
-            </section>
+            </div>
           </section>
+        </div>
 
-          <section v-if="sessionDetail" class="session-detail-reports" :class="{ active: sessionDetailTab === 'reports' }" aria-label="Session reports">
-            <header class="detail-panel-title">
-              <span>Reports</span>
-              <span>{{ sessionDetail.notes.length }}</span>
-            </header>
-            <button v-for="note in sessionDetail.notes" :key="note.id" class="report-object-row" type="button" @click="selectInspector('note', note.id)">
-              <span>@{{ endpointLabel(note.from) }}</span>
-              <p>{{ note.text }}</p>
-              <small>{{ messageTime(note.created_at) }} · {{ note.visibility }}</small>
+        <aside class="stack">
+          <section class="panel">
+            <div class="section-head"><h3>Ready to read</h3><span>{{ readyArtifactProjects.length }}</span></div>
+            <button v-for="session in readyArtifactProjects" :key="session.session_id" class="artifact-row" type="button" @click="openSessionDetail(session, session.latest_artifact ? { kind: 'artifact', id: session.latest_artifact.id } : undefined)">
+              <strong>{{ session.latest_artifact?.title || session.title }}</strong>
+              <span class="chip doc">{{ session.title }}</span>
             </button>
-            <p v-if="!sessionDetail.notes.length" class="dashboard-muted">No short reports yet</p>
+            <p v-if="!readyArtifactProjects.length">Submitted artifacts will appear here as compact readers.</p>
           </section>
+          <section class="panel quiet-panel">
+            <h3>Recently consumed</h3>
+            <p v-if="recentlyConsumedProjects.length">{{ recentlyConsumedProjects.map((session) => session.title).join(', ') }}</p>
+            <p v-else>Accepted work stays available, but stops pulling attention.</p>
+          </section>
+        </aside>
+      </section>
 
-          <aside class="detail-inspector" :class="{ active: sessionDetailTab === 'inspector' }" aria-label="Inspector">
-            <template v-if="inspectorObject">
-              <header class="detail-inspector-header">
-                <span class="session-section-label">{{ inspectorObject.eyebrow }}</span>
-                <h2>{{ inspectorObject.title }}</h2>
-                <p v-if="inspectorObject.summary">{{ inspectorObject.summary }}</p>
-                <span v-if="inspectorObject.status" class="work-phase">{{ inspectorObject.status }}</span>
-              </header>
-
-              <section class="inspector-actions-panel">
-                <button v-if="inspectorObject.ref.kind === 'session'" class="subtle-button" type="button" @click="requestSelectedSynthesis">Request synthesis</button>
-                <button v-if="inspectorObject.ref.kind === 'artifact'" class="subtle-button" type="button" @click="reviewArtifact(currentDetailSessionId(), inspectorObject.ref.id, 'accepted')">Accept</button>
-                <button v-if="inspectorObject.ref.kind === 'artifact'" class="subtle-button" type="button" @click="reviewArtifact(currentDetailSessionId(), inspectorObject.ref.id, 'revision_requested')">Request revision</button>
-                <button v-if="inspectorObject.ref.kind === 'approval'" class="subtle-button" type="button" @click="resolveSessionApproval(currentDetailSessionId(), inspectorObject.ref.id, true)">Approve</button>
-                <button v-if="inspectorObject.ref.kind === 'approval'" class="subtle-button" type="button" @click="resolveSessionApproval(currentDetailSessionId(), inspectorObject.ref.id, false)">Reject</button>
-                <button class="subtle-button" type="button" @click="openTraceViewer">Open trace</button>
-              </section>
-
-              <section v-if="inspectorObject.ref.kind === 'artifact'" class="session-inspector-section">
-                <span class="session-section-label">Artifact</span>
-                <ArtifactMarkdown :source="inspectorMarkdownText(inspectorObject)" />
-              </section>
-
-              <section v-else class="session-inspector-section">
-                <span class="session-section-label">Payload</span>
-                <pre class="inspector-pre">{{ objectPreview(inspectorObject.payload) }}</pre>
-              </section>
-
-              <section class="session-inspector-section">
-                <span class="session-section-label">Source Refs</span>
-                <div v-if="inspectorObject.source_refs.length" class="inspector-chip-list">
-                  <span v-for="ref in inspectorObject.source_refs" :key="sourceRefLabel(ref)">{{ sourceRefLabel(ref) }}</span>
-                </div>
-                <p v-else class="dashboard-muted">No source refs</p>
-              </section>
-
-              <section class="session-inspector-section">
-                <span class="session-section-label">Trace Refs</span>
-                <div v-if="inspectorObject.trace_refs.length" class="inspector-chip-list">
-                  <button v-for="ref in inspectorObject.trace_refs" :key="traceRefLabel(ref)" type="button" @click="openTraceViewer">{{ traceRefLabel(ref) }}</button>
-                </div>
-                <p v-else class="dashboard-muted">No trace refs</p>
-              </section>
-
-              <section class="session-inspector-section">
-                <span class="session-section-label">Related</span>
-                <div v-if="inspectorObject.related.length" class="inspector-chip-list">
-                  <span v-for="item in inspectorObject.related" :key="item">{{ item }}</span>
-                </div>
-                <p v-else class="dashboard-muted">No related objects</p>
-              </section>
-
-              <section class="session-inspector-section">
-                <span class="session-section-label">Events</span>
-                <div v-if="inspectorEvents.length" class="inspector-event-list">
-                  <button v-for="event in inspectorEvents" :key="event.id" type="button" @click="openTraceViewer">
-                    <strong>{{ event.type }}</strong>
-                    <span>{{ messageTime(event.at) }} · {{ event.id }}</span>
-                  </button>
-                </div>
-                <p v-else class="dashboard-muted">No matching event history</p>
-              </section>
-            </template>
-          </aside>
-        </div>
-      </div>
-
-      <div v-else-if="activeView === 'review'" class="review-queue-view">
-        <div class="work-dashboard-toolbar">
-          <label class="dashboard-search">
-            <Search :size="15" aria-hidden="true" />
-            <input v-model="reviewSearch" type="search" placeholder="Search queue, sessions, producers" />
-          </label>
-          <div class="phase-filter" aria-label="Review kind filter">
-            <button
-              v-for="item in reviewKindFilters"
-              :key="item.kind"
-              class="phase-filter-item"
-              :class="{ active: reviewKindFilter === item.kind }"
-              type="button"
-              @click="reviewKindFilter = item.kind"
-            >
-              <span>{{ item.label }}</span>
-              <span>{{ item.count }}</span>
-            </button>
+      <section v-else-if="activeView === 'review'" class="review-queue-view" :class="['content', 'wide-side']">
+        <div class="stack">
+          <div class="work-dashboard-toolbar atlas-filter-row">
+            <label class="dashboard-search"><Search :size="15" aria-hidden="true" /><input v-model="reviewSearch" type="search" placeholder="Search actions, projects, agents" /></label>
+            <div class="phase-filter" aria-label="Needs You kind filter">
+              <button v-for="item in reviewKindFilters" :key="item.kind" class="phase-filter-item" :class="{ active: reviewKindFilter === item.kind }" type="button" @click="reviewKindFilter = item.kind"><span>{{ item.label }}</span><span>{{ item.count }}</span></button>
+            </div>
           </div>
-        </div>
-
-        <div v-if="sessionsError" class="dashboard-error">
-          <ShieldAlert :size="16" aria-hidden="true" />
-          <span>{{ sessionsError }}</span>
-          <button class="subtle-button" type="button" @click="loadDashboard">Retry</button>
-        </div>
-
-        <div v-if="dashboardIsStale" class="dashboard-stale">
-          <ShieldAlert :size="16" aria-hidden="true" />
-          <span>Review queue may be stale because dashboard updates have paused.</span>
-          <button class="subtle-button" type="button" @click="loadDashboard">Refresh</button>
-        </div>
-
-        <div v-if="sessionsLoading && !reviewQueue.length" class="session-skeleton-list">
-          <div v-for="index in 3" :key="index" class="session-skeleton-row"></div>
-        </div>
-
-        <div v-else-if="!reviewQueue.length" class="dashboard-empty">
-          <div class="dashboard-empty-title">Nothing waiting on you</div>
-          <div class="dashboard-empty-text">Artifact reviews, approvals, questions, and validations appear here when real session events require human action.</div>
-        </div>
-
-        <div v-else-if="!visibleReviewQueue.length" class="dashboard-empty compact-empty">
-          <div class="dashboard-empty-title">No matching review items</div>
-          <div class="dashboard-empty-text">Adjust the search or queue filter.</div>
-        </div>
-
-        <section v-else class="review-queue-list" aria-label="Review queue">
-          <article v-for="item in visibleReviewQueue" :key="item.id" class="review-queue-item" :data-kind="item.kind">
-            <button class="review-queue-main" type="button" @click="openReviewItem(item)">
-              <span class="work-phase">{{ reviewKindLabel(item.kind) }}</span>
-              <strong>{{ item.title }}</strong>
-              <span>{{ reviewItemMeta(item) }}</span>
-              <small>{{ sessionForReview(item)?.title || item.session_id }}</small>
-              <p>{{ item.consequence }}</p>
+          <article v-for="item in visibleReviewQueue" :key="item.id" class="work-card attention-card" :class="reviewToneClass(item.kind)">
+            <button class="card-button" type="button" @click="openReviewItem(item)">
+              <span class="card-top"><strong>{{ item.title }}</strong><span class="chip" :class="reviewToneClass(item.kind)">{{ reviewKindLabel(item.kind) }}</span></span>
+              <p>{{ item.consequence || item.required_action }}</p>
+              <span class="meta"><span>{{ sessionForReview(item)?.title || item.session_id }}</span><span>{{ reviewItemMeta(item) }}</span></span>
             </button>
-
-            <div class="review-queue-actions">
-              <input v-if="item.kind !== 'question'" v-model="actionNotes[item.id]" type="text" placeholder="Note" :aria-label="'Note for ' + item.required_action" />
-              <input v-if="item.kind === 'question'" v-model="actionAnswers[item.id]" type="text" placeholder="Answer" :aria-label="'Answer for ' + item.title" />
-
-              <template v-if="item.kind === 'artifact'">
-                <button type="button" :disabled="actionPending(item.id + ':accepted')" @click="reviewArtifact(item.session_id, reviewItemObjectId(item), 'accepted')">Accept</button>
-                <button type="button" :disabled="actionPending(item.id + ':revision_requested')" @click="reviewArtifact(item.session_id, reviewItemObjectId(item), 'revision_requested')">Revise</button>
-                <button type="button" :disabled="actionPending(item.id + ':rejected')" @click="reviewArtifact(item.session_id, reviewItemObjectId(item), 'rejected')">Reject</button>
-              </template>
-              <template v-else-if="item.kind === 'approval'">
-                <button type="button" :disabled="actionPending(item.id + ':approved')" @click="resolveSessionApproval(item.session_id, reviewItemObjectId(item), true)">Approve</button>
-                <button type="button" :disabled="actionPending(item.id + ':rejected')" @click="resolveSessionApproval(item.session_id, reviewItemObjectId(item), false)">Reject</button>
-              </template>
-              <template v-else-if="item.kind === 'validation'">
-                <button type="button" :disabled="actionPending(item.id + ':passed')" @click="recordValidation(item.session_id, reviewItemObjectId(item), 'passed')">Pass</button>
-                <button type="button" :disabled="actionPending(item.id + ':failed')" @click="recordValidation(item.session_id, reviewItemObjectId(item), 'failed')">Fail</button>
-              </template>
-              <template v-else-if="item.kind === 'question'">
-                <button type="button" :disabled="actionPending(item.id + ':answer')" @click="answerQuestion(item.session_id, reviewItemObjectId(item))">Answer</button>
-              </template>
-              <button class="icon-button" type="button" title="Open detail" @click="openReviewItem(item)">
-                <ChevronRight :size="15" aria-hidden="true" />
-              </button>
+            <div class="actions">
+              <input v-if="item.kind !== 'question'" v-model="actionNotes[item.id]" class="atlas-input" type="text" placeholder="Note" :aria-label="'Note for ' + item.required_action" />
+              <input v-if="item.kind === 'question'" v-model="actionAnswers[item.id]" class="atlas-input" type="text" placeholder="Answer" :aria-label="'Answer for ' + item.title" />
+              <template v-if="item.kind === 'artifact'"><button class="mini primary" type="button" :disabled="actionPending(item.id + ':accepted')" @click="reviewArtifact(item.session_id, reviewItemObjectId(item), 'accepted')">Accept</button><button class="mini soft" type="button" :disabled="actionPending(item.id + ':revision_requested')" @click="reviewArtifact(item.session_id, reviewItemObjectId(item), 'revision_requested')">Revise</button></template>
+              <template v-else-if="item.kind === 'approval'"><button class="mini human" type="button" :disabled="actionPending(item.id + ':approved')" @click="resolveSessionApproval(item.session_id, reviewItemObjectId(item), true)">Approve</button><button class="mini soft" type="button" :disabled="actionPending(item.id + ':rejected')" @click="resolveSessionApproval(item.session_id, reviewItemObjectId(item), false)">Reject</button></template>
+              <template v-else-if="item.kind === 'validation'"><button class="mini primary" type="button" :disabled="actionPending(item.id + ':passed')" @click="recordValidation(item.session_id, reviewItemObjectId(item), 'passed')">Pass</button><button class="mini soft" type="button" :disabled="actionPending(item.id + ':failed')" @click="recordValidation(item.session_id, reviewItemObjectId(item), 'failed')">Fail</button></template>
+              <template v-else-if="item.kind === 'question'"><button class="mini human" type="button" :disabled="actionPending(item.id + ':answer')" @click="answerQuestion(item.session_id, reviewItemObjectId(item))">Answer</button></template>
             </div>
           </article>
-        </section>
-      </div>
+          <div v-if="!visibleReviewQueue.length" class="panel empty-panel"><h3>Nothing waiting on you</h3><p>Handled approvals and artifacts will stay linked from their Projects.</p></div>
+        </div>
+        <aside class="panel"><h3>Human attention model</h3><p>Needs You is a Project lens, not a separate queue. Each item opens the durable card, artifact, approval, question, or validation that produced it.</p></aside>
+      </section>
 
-      <div v-else-if="activeView === 'chat'" class="collab-layout">
-        <section class="conversation-pane" aria-label="Conversation">
-          <div ref="timeline" class="timeline" aria-live="polite">
-            <div v-if="!rows.length" class="timeline-empty">
-              <div class="empty-title">No messages in this room yet</div>
-              <div class="empty-copy">Start with a mention, then agent replies, tool calls, and approvals will stay in the same timeline.</div>
+      <section v-else-if="activeView === 'session'" class="session-detail-view" :class="['content', artifactReaderObject ? 'three-col artifact-reader-grid' : 'two-col']">
+        <template v-if="detailSession && artifactReaderObject">
+          <aside class="panel reader-nav">
+            <h3>Artifacts</h3>
+            <button
+              v-for="artifact in detailArtifacts"
+              :key="artifact.id"
+              class="artifact-row"
+              :class="{ active: artifact.id === artifactReaderId }"
+              type="button"
+              @click="selectInspector('artifact', artifact.id)"
+            >
+              <strong>{{ artifact.title || artifact.kind }}</strong>
+              <span class="chip doc">{{ artifact.status }}</span>
+            </button>
+            <p v-if="!detailArtifacts.length">No artifacts have been submitted for this Project.</p>
+          </aside>
+
+          <article class="reader">
+            <header class="reader-head">
+              <div><strong>{{ artifactReaderTitle }}</strong><br><span>{{ detailSession.title }} · @{{ artifactReaderAuthor }}</span></div>
+              <span class="chip doc">{{ artifactReaderStatus }}</span>
+            </header>
+            <div class="reader-body">
+              <ArtifactMarkdown :source="artifactReaderMarkdown" />
             </div>
+          </article>
 
-            <template v-for="row in rows" :key="row.id">
-              <article
-                v-if="row.rowType === 'message' && isFinalReportMessage(row.message)"
-                class="session-report-row"
-                :class="{ 'thread-reply': row.threadReply }"
-                :data-rendered-id="row.message.id"
-              >
-                <div class="session-report-header">
-                  <span class="session-report-icon"><Check :size="15" aria-hidden="true" /></span>
-                  <span class="actor-meta">
-                    <span class="sender">{{ finalReportTitle(row.message) }}</span>
-                    <span class="meta">{{ finalReportMeta(row.message) }}</span>
-                  </span>
-                </div>
-                <div class="message-body session-report-body">
-                  <ArtifactMarkdown :source="row.message.text" compact />
-                  <div v-if="canOpenArtifactProjection(row.message)" class="message-actions session-report-actions">
-                    <button class="subtle-button" type="button" @click="openArtifactProjection(row.message)">
-                      <FileText :size="14" aria-hidden="true" />
-                      <span>Open artifact</span>
+          <aside class="detail-inspector" :class="'stack'">
+            <section class="panel">
+              <h3>Review</h3>
+              <p>Accept the artifact as project context, or ask the agent to revise it.</p>
+              <div class="actions">
+                <button class="mini primary" type="button" :disabled="!artifactReaderId || actionPending(artifactReaderId + ':accepted')" @click="reviewArtifact(detailSession.session_id, artifactReaderId, 'accepted')">Accept</button>
+                <button class="mini soft" type="button" :disabled="!artifactReaderId || actionPending(artifactReaderId + ':revision_requested')" @click="reviewArtifact(detailSession.session_id, artifactReaderId, 'revision_requested')">Revise</button>
+              </div>
+            </section>
+            <section class="panel">
+              <h3>Linked work</h3>
+              <p>Project: {{ detailSession.title }}<br>Room: {{ projectHomeRoomLabel(detailSession) }}</p>
+              <button class="mini soft" type="button" @click="sessionDetailTab = 'work'">Back to board</button>
+            </section>
+            <section class="panel">
+              <h3>Evidence</h3>
+              <p v-if="artifactReaderTraceLabels.length">{{ artifactReaderTraceLabels.join(' · ') }}</p>
+              <p v-else-if="artifactReaderSourceLabels.length">{{ artifactReaderSourceLabels.join(' · ') }}</p>
+              <p v-else>No trace or source reference recorded yet.</p>
+              <button class="mini soft" type="button" @click="openTraceViewer">Open Observe</button>
+            </section>
+          </aside>
+        </template>
+
+        <template v-else-if="detailSession && sessionDetailTab === 'inspector' && inspectorObject">
+          <div class="stack">
+            <article class="banner">
+              <div><strong>{{ inspectorTitle }}</strong><p>{{ inspectorSummary }}</p></div>
+              <div class="actions"><button class="mini soft" type="button" @click="sessionDetailTab = 'work'">Back to board</button></div>
+            </article>
+            <section class="session-inspector" :class="['panel', 'work-detail-panel']">
+              <div class="section-head"><h3>{{ inspectorEyebrow }}</h3><span>{{ inspectorStatus }}</span></div>
+              <p>{{ inspectorPayloadPreview }}</p>
+              <div v-if="inspectorEvents.length" class="trace-list compact-trace-list">
+                <article v-for="event in inspectorEvents.slice(0, 5)" :key="String(event.sequence ?? event.type) + ':' + event.type" class="trace-event">
+                  <span class="trace-time">{{ 'created_at' in event && typeof event.created_at === 'string' ? messageTime(event.created_at) : '' }}</span>
+                  <span class="trace-dot"></span>
+                  <div class="trace-body"><strong>{{ event.type }}</strong><span>{{ objectPreview(event) }}</span></div>
+                </article>
+              </div>
+            </section>
+          </div>
+          <aside class="stack">
+            <section class="panel"><h3>Linked work</h3><p>Project: {{ detailSession.title }}<br>Room: {{ projectHomeRoomLabel(detailSession) }}</p></section>
+            <section class="panel"><h3>Evidence</h3><p v-if="inspectorTraceLabels.length">{{ inspectorTraceLabels.join(' · ') }}</p><p v-else-if="inspectorSourceLabels.length">{{ inspectorSourceLabels.join(' · ') }}</p><p v-else>No source reference recorded yet.</p><button class="mini soft" type="button" @click="openTraceViewer">Open Observe</button></section>
+          </aside>
+        </template>
+
+        <template v-else-if="detailSession">
+          <div class="stack">
+            <article v-if="projectDetailNeeds.length" class="banner">
+              <div><strong>{{ projectDetailNeeds.length }} item {{ projectDetailNeeds.length === 1 ? 'needs' : 'need' }} you in this Project.</strong><p>{{ projectDetailNeeds[0]?.required_action }}: {{ projectDetailNeeds[0]?.title }}</p></div>
+              <div class="actions"><button class="mini human" type="button" @click="showReviewQueue">Open Needs You</button></div>
+            </article>
+
+            <section class="session-board" :class="'board-shell'">
+              <div class="section-head"><h3>Scrum board</h3><span>{{ projectHomeRoomLabel(detailSession) }} · {{ detailObjectCounts.artifacts }} artifacts</span></div>
+              <div v-if="detailBuildBoard" class="build-scrum-board" :class="'board'">
+                <div v-for="column in detailBuildBoard.columns" :key="column.key" class="column">
+                  <div class="column-head"><strong>{{ buildBoardColumnLabel(column) }}</strong><span>{{ column.items.length }}</span></div>
+                  <article v-for="item in column.items" :key="buildBoardItemKey(item)" class="session-work-card" :class="['work-card', workCardToneClass(item)]">
+                    <button class="card-button" type="button" @click="selectBuildBoardItem(item)">
+                      <span class="card-top"><strong>{{ item.title }}</strong><span class="chip" :class="workCardToneClass(item)">{{ cardOwnerLabel(item) }}</span></span>
+                      <p>{{ item.summary || buildBoardItemMeta(item) }}</p>
                     </button>
-                  </div>
+                  </article>
+                  <p v-if="!column.items.length" class="column-empty">{{ buildBoardColumnEmptyText(column) }}</p>
                 </div>
-              </article>
-
-              <article
-                v-else-if="row.rowType === 'message' && isArtifactProjectionMessage(row.message)"
-                class="artifact-projection-row"
-                :class="{ 'thread-reply': row.threadReply }"
-                :data-rendered-id="row.message.id"
-              >
-                <div class="artifact-projection-header">
-                  <span class="artifact-projection-icon"><FileText :size="15" aria-hidden="true" /></span>
-                  <span class="actor-meta">
-                    <span class="sender">{{ artifactProjectionTitle(row.message) }}</span>
-                    <span class="meta">{{ artifactProjectionMeta(row.message) }}</span>
-                  </span>
-                </div>
-                <div class="message-body artifact-projection-body">
-                  <div class="text">{{ row.message.text }}</div>
-                  <div v-if="canOpenArtifactProjection(row.message)" class="message-actions">
-                    <button class="subtle-button" type="button" @click="openArtifactProjection(row.message)">
-                      <ChevronRight :size="14" aria-hidden="true" />
-                      <span>Open artifact</span>
+              </div>
+              <div v-else class="board">
+                <div v-for="column in detailLifecycleColumns" :key="column.phase" class="column">
+                  <div class="column-head"><strong>{{ column.label }}</strong><span>{{ column.items.length }}</span></div>
+                  <article v-for="item in column.items" :key="item.kind + ':' + item.id" class="work-card">
+                    <button class="card-button" type="button" @click="selectInspector(item.kind, item.id)">
+                      <span class="card-top"><strong>{{ item.title }}</strong><span class="chip">{{ item.status || item.kind }}</span></span>
+                      <p>{{ item.meta }}</p>
                     </button>
-                  </div>
+                  </article>
                 </div>
-              </article>
+              </div>
+            </section>
 
-              <article
-                v-else-if="row.rowType === 'message'"
-                class="message-row message"
-                :class="{ 'thread-reply': row.threadReply }"
-                :data-kind="row.message.kind"
-                :data-rendered-id="row.message.id"
-              >
-                <div class="actor-cell">
-                  <span class="actor-avatar" :data-kind="row.message.kind">{{ messageActorLabel(row.message).slice(0, 1).toUpperCase() }}</span>
-                  <span class="actor-meta">
-                    <span class="sender">{{ messageActorLabel(row.message) }}</span>
-                    <span class="meta">{{ messageRoleLabel(row.message) }} · {{ messageTime(row.message.created_at) }}</span>
-                  </span>
-                </div>
-                <div class="message-body">
-                  <div class="text">{{ row.message.text }}</div>
-                  <div class="message-actions">
-                    <button
-                      v-if="canCancel(row)"
-                      class="subtle-button"
-                      type="button"
-                      :data-run-cancel-for="row.message.id"
-                      :disabled="cancelDisabled(row)"
-                      @click="cancelRun(row.message.id, row)"
-                    >
-                      <X v-if="row.runState === 'active'" :size="14" aria-hidden="true" />
-                      <Check v-else :size="14" aria-hidden="true" />
-                      <span>{{ cancelLabel(row) }}</span>
-                    </button>
-                    <button class="subtle-button" type="button" @click="setActiveThread(row.message)">
-                      <CornerDownRight :size="14" aria-hidden="true" />
-                      <span>Reply</span>
-                    </button>
-                  </div>
-                </div>
-              </article>
-
-              <article
-                v-else-if="row.rowType === 'simple'"
-                :class="['system-row', row.className, { 'thread-reply': row.threadReply }]"
-                :data-rendered-id="row.renderedId"
-              >
-                <div class="actor-cell compact">
-                  <span class="activity-dot" :data-state="row.className"></span>
-                  <span class="meta">{{ endpointLabel(row.meta) }}</span>
-                </div>
-                <div class="message-body">
-                  <div class="text">{{ row.text }}</div>
-                </div>
-              </article>
-
-              <article
-                v-else-if="row.rowType === 'agent-status'"
-                class="agent-status-row"
-                :class="['activity-row', { 'thread-reply': row.threadReply }]"
-                :data-state="agentStatusVisualState(row)"
-              >
-                <div class="actor-cell compact">
-                  <span class="actor-avatar agent-avatar"><Bot :size="15" aria-hidden="true" /></span>
-                  <span class="actor-meta">
-                    <span class="sender">{{ endpointLabel(row.source) }}</span>
-                    <span class="meta">agent status</span>
-                  </span>
-                </div>
-                <div class="agent-status-block">
-                  <div class="agent-status-text">
-                    <span class="tool-state" :data-state="agentStatusVisualState(row)">{{ agentStatusLabel(row) }}</span>
-                    <span>{{ row.text }}</span>
-                  </div>
-                  <div class="agent-run-meta">
-                    <span v-for="chip in agentStatusMetaChips(row)" :key="chip" :title="chip.startsWith('run ') ? row.runId : undefined">{{ chip }}</span>
-                  </div>
-
-                  <details
-                    v-for="currentTool in currentStatusToolList(row)"
-                    :key="currentTool.id"
-                    class="agent-current-tool"
-                    :open="currentTool.open"
-                    :data-state="currentTool.state"
-                    @toggle="syncToolOpen(currentTool, $event)"
-                  >
-                    <summary class="agent-current-tool-summary">
-                      <ChevronRight class="details-chevron" :size="15" aria-hidden="true" />
-                      <span class="endpoint-kind-icon" :data-kind="toolInlineEndpointKind(currentTool)" :title="toolInlineEndpoint(currentTool)">
-                        <Bot v-if="toolInlineEndpointKind(currentTool) === 'agent'" :size="15" aria-hidden="true" />
-                        <MessageSquare v-else-if="toolInlineEndpointKind(currentTool) === 'app'" :size="15" aria-hidden="true" />
-                        <TerminalSquare v-else :size="15" aria-hidden="true" />
-                      </span>
-                      <span class="tool-inline-summary">
-                        <span class="tool-endpoint" :title="toolInlineEndpoint(currentTool)">{{ toolInlineEndpointLabel(currentTool) }}</span>
-                        <span class="tool-action">{{ toolInlineAction(currentTool) }}</span>
-                        <span v-if="toolInlinePayload(currentTool)" class="tool-payload">{{ toolInlinePayload(currentTool) }}</span>
-                      </span>
-                    </summary>
-
-                    <div class="agent-tool-detail-body">
-                      <div class="tool-call-detail">
-                        <span>endpoint</span>
-                        <code>{{ toolInlineEndpoint(currentTool) }}</code>
-                        <span>action</span>
-                        <code>{{ toolInlineAction(currentTool) }}</code>
-                        <span v-if="toolInlinePayload(currentTool)">payload</span>
-                        <pre v-if="toolInlinePayload(currentTool)" class="tool-pre inline-payload">{{ toolInlinePayload(currentTool) }}</pre>
-                        <span>arguments</span>
-                        <pre class="tool-pre inline-payload">{{ currentTool.argumentsText }}</pre>
-                        <span v-if="currentTool.resultText !== undefined">result</span>
-                        <pre v-if="currentTool.resultText !== undefined" class="tool-pre inline-payload">{{ currentTool.resultText }}</pre>
-                      </div>
-
-                      <div v-if="currentTool.approval" class="tool-section tool-approval" :data-approval-id="currentTool.approval.id">
-                        <div class="approval-header">
-                          <span class="approval-status" :data-state="approvalState(currentTool)">{{ approvalLabel(currentTool) }}</span>
-                          <span class="grant-summary">{{ grantSummary(currentTool.approvalResult) }}</span>
-                        </div>
-                        <div class="approval-card">
-                          <div class="approval-summary-line">{{ approvalRiskLabel(currentTool.approval) }}: {{ currentTool.approval.request.summary }}</div>
-                          <div class="approval-target-line">{{ approvalPayloadSummary(currentTool.approval) }}</div>
-                          <div class="approval-chip-row">
-                            <span v-for="chip in approvalDetailChips(currentTool.approval)" :key="chip" class="approval-chip">{{ chip }}</span>
-                          </div>
-                        </div>
-                        <template v-if="diffPreview(currentTool.approval)">
-                          <div class="tool-section-label">Diff Preview</div>
-                          <pre class="tool-pre">{{ diffPreview(currentTool.approval) }}</pre>
-                        </template>
-                        <details class="raw-details">
-                          <summary>Raw payload</summary>
-                          <pre class="tool-pre">{{ approvalRawPayload(currentTool.approval) }}</pre>
-                        </details>
-                        <div class="approval-actions">
-                          <button
-                            type="button"
-                            data-decision="approve"
-                            :disabled="Boolean(currentTool.approvalResult)"
-                            @click="decideApproval(currentTool.approval.id, true)"
-                          >
-                            <Check :size="14" aria-hidden="true" />
-                            <span>Approve</span>
-                          </button>
-                          <button
-                            type="button"
-                            data-decision="deny"
-                            :disabled="Boolean(currentTool.approvalResult)"
-                            @click="decideApproval(currentTool.approval.id, false)"
-                          >
-                            <X :size="14" aria-hidden="true" />
-                            <span>Deny</span>
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  </details>
-
-                  <details v-if="previousStatusTools(row).length" class="previous-tool-calls agent-tool-history">
-                    <summary>
-                      <span>Tool history</span>
-                      <span>{{ previousStatusTools(row).length }}</span>
-                    </summary>
-                    <div class="previous-tool-list">
-                      <details
-                        v-for="previous in previousStatusTools(row)"
-                        :key="previous.id"
-                        class="previous-tool-call"
-                      >
-                        <summary>
-                          <span class="tool-state" :data-state="previous.state">{{ previous.state }}</span>
-                          <span class="tool-inline-summary">
-                            <span class="endpoint-kind-icon compact" :data-kind="toolInlineEndpointKind(previous)" :title="toolInlineEndpoint(previous)">
-                              <Bot v-if="toolInlineEndpointKind(previous) === 'agent'" :size="13" aria-hidden="true" />
-                              <MessageSquare v-else-if="toolInlineEndpointKind(previous) === 'app'" :size="13" aria-hidden="true" />
-                              <TerminalSquare v-else :size="13" aria-hidden="true" />
-                            </span>
-                            <span class="tool-endpoint" :title="toolInlineEndpoint(previous)">{{ toolInlineEndpointLabel(previous) }}</span>
-                            <span class="tool-action">{{ toolInlineAction(previous) }}</span>
-                            <span v-if="toolInlinePayload(previous)" class="tool-payload">{{ toolInlinePayload(previous) }}</span>
-                          </span>
-                        </summary>
-                        <div class="tool-call-detail previous-tool-detail">
-                          <span>endpoint</span>
-                          <code>{{ toolInlineEndpoint(previous) }}</code>
-                          <span>action</span>
-                          <code>{{ toolInlineAction(previous) }}</code>
-                          <span v-if="toolInlinePayload(previous)">payload</span>
-                          <pre v-if="toolInlinePayload(previous)" class="tool-pre inline-payload">{{ toolInlinePayload(previous) }}</pre>
-                          <span>arguments</span>
-                          <pre class="tool-pre inline-payload">{{ previous.argumentsText }}</pre>
-                          <span v-if="previous.resultText !== undefined">result</span>
-                          <pre v-if="previous.resultText !== undefined" class="tool-pre inline-payload">{{ previous.resultText }}</pre>
-                        </div>
-                      </details>
-                    </div>
-                  </details>
-                </div>
-              </article>
-
-              <article v-else-if="row.rowType === 'approval'" class="approval approval-row" :data-approval-id="row.approval.id">
-                <div class="actor-cell compact">
-                  <span class="actor-avatar approval-avatar"><ShieldAlert :size="15" aria-hidden="true" /></span>
-                  <span class="actor-meta">
-                    <span class="sender">Approval</span>
-                    <span class="meta">{{ row.approval.request.risk }}</span>
-                  </span>
-                </div>
-                <div class="message-body">
-                  <div class="approval-card">
-                    <div class="approval-summary-line">{{ approvalRiskLabel(row.approval) }}: {{ row.approval.request.summary }}</div>
-                    <div class="approval-target-line">{{ approvalPayloadSummary(row.approval) }}</div>
-                    <div class="approval-chip-row">
-                      <span v-for="chip in approvalDetailChips(row.approval)" :key="chip" class="approval-chip">{{ chip }}</span>
-                    </div>
-                  </div>
-                  <div class="approval-actions">
-                    <button type="button" data-decision="approve" @click="decideApproval(row.approval.id, true)">
-                      <Check :size="14" aria-hidden="true" />
-                      <span>Approve</span>
-                    </button>
-                    <button type="button" data-decision="deny" @click="decideApproval(row.approval.id, false)">
-                      <X :size="14" aria-hidden="true" />
-                      <span>Deny</span>
-                    </button>
-                  </div>
-                  <details class="raw-details compact">
-                    <summary>Raw payload</summary>
-                    <pre class="tool-pre">{{ approvalRawPayload(row.approval) }}</pre>
-                  </details>
-                </div>
-              </article>
-            </template>
+            <section v-if="sessionDetail" class="project-grid detail-object-grid-atlas">
+              <article class="project-card"><strong>Objective</strong><p>{{ detailSession.objective || sessionPrimaryText(detailSession) }}</p></article>
+              <article class="project-card"><strong>Acceptance</strong><p>{{ detailSession.acceptance_criteria?.join(' · ') || 'No criteria recorded' }}</p></article>
+              <article class="project-card doc"><strong>Artifacts</strong><p>{{ sessionDetail.artifacts.map((artifact) => artifact.title || artifact.kind).join(', ') || 'No artifacts yet' }}</p></article>
+            </section>
           </div>
 
-          <form class="composer" @submit.prevent="submitMessage">
-            <div v-if="activeThreadId" class="thread-context">
-              <CornerDownRight :size="15" aria-hidden="true" />
-              <span class="thread-label">{{ activeThreadLabel }}</span>
-              <button class="icon-button" type="button" aria-label="Clear thread" @click="clearActiveThread()">
-                <X :size="15" aria-hidden="true" />
-              </button>
+          <aside class="room-stream">
+            <div class="room-head"><div><strong>Home room: {{ projectHomeRoomLabel(detailSession) }}</strong><br><span>Filtered reports and evidence for this Project.</span></div><button class="mini soft" type="button" @click="openSessionThread(detailSession)">Open room</button></div>
+            <div class="messages">
+              <article v-for="note in projectDetailNotes" :key="note.id" class="message">
+                <div class="avatar agent">{{ endpointLabel(note.from).slice(0, 2).toUpperCase() }}</div>
+                <div class="message-body"><div class="message-meta"><strong>@{{ endpointLabel(note.from) }}</strong><span>{{ messageTime(note.created_at) }}</span></div><p class="message-text">{{ note.text }}</p></div>
+              </article>
+              <section v-for="artifact in sessionDetail?.artifacts.slice(0, 4)" :key="artifact.id" class="room-card doc">
+                <span class="chip doc">Artifact</span><p class="message-text">{{ artifact.title || artifact.kind }} · {{ artifact.status }}</p><button class="mini soft" type="button" @click="selectInspector('artifact', artifact.id)">Read</button>
+              </section>
+              <p v-if="!projectDetailNotes.length && !(sessionDetail?.artifacts.length)" class="room-empty">No linked reports yet.</p>
             </div>
-            <textarea ref="messageInput" v-model="messageText" rows="2" autocomplete="off" placeholder="Message an agent or the room" />
-            <button class="send-button" type="submit">
-              <Send :size="16" aria-hidden="true" />
-              <span>Send</span>
-            </button>
+          </aside>
+        </template>
+        <div v-else class="panel empty-panel"><h3>Project not found</h3><p>Return to Projects or open Observe to inspect the raw IPC stream.</p><button class="mini primary" type="button" @click="showSessions">Projects</button></div>
+      </section>
+
+      <section v-else-if="activeView === 'chat'" class="content two-col">
+        <section class="room-stream full-room">
+          <div class="room-head"><div><strong>{{ channelTitle }}</strong><br><span>Rooms own conversation. Project cards are projections.</span></div><span class="chip">{{ status }}</span></div>
+          <div ref="timeline" class="messages" aria-live="polite">
+            <div v-if="!rows.length" class="panel empty-panel"><h3>No messages in this room yet</h3><p>Start with an agent mention. Short replies, approvals, and artifact cards will stay in this timeline.</p></div>
+            <template v-for="row in rows" :key="row.id">
+              <article v-if="row.rowType === 'message' && !isArtifactProjectionMessage(row.message) && !isFinalReportMessage(row.message)" class="message" :class="{ 'thread-reply': row.threadReply }">
+                <div class="avatar" :class="row.message.kind">{{ messageActorLabel(row.message).slice(0, 2).toUpperCase() }}</div>
+                <div class="message-body"><div class="message-meta"><strong>{{ messageActorLabel(row.message) }}</strong><span>{{ messageTime(row.message.created_at) }}</span></div><p class="message-text">{{ row.message.text }}</p><div class="actions"><button v-if="canCancel(row)" class="mini soft" type="button" :disabled="cancelDisabled(row)" @click="cancelRun(row.message.id, row)">{{ cancelLabel(row) }}</button><button class="mini soft reply-action" type="button" @click="setActiveThread(row.message)">Reply</button></div></div>
+              </article>
+              <template v-else-if="row.rowType === 'message' && (isArtifactProjectionMessage(row.message) || isFinalReportMessage(row.message))">
+                <article class="message" :class="{ 'thread-reply': row.threadReply }">
+                  <div class="avatar" :class="row.message.kind">{{ messageActorLabel(row.message).slice(0, 2).toUpperCase() }}</div>
+                  <div class="message-body"><div class="message-meta"><strong>{{ messageActorLabel(row.message) }}</strong><span>{{ messageTime(row.message.created_at) }}</span></div><p class="message-text">{{ projectionSummaryText(row.message) }}</p><div class="actions"><button class="mini soft reply-action" type="button" @click="setActiveThread(row.message)">Reply</button></div></div>
+                </article>
+                <section class="artifact-attachment doc">
+                  <div class="artifact-attachment-head"><span class="chip doc">{{ projectionAttachmentKind(row.message) }}</span><span>{{ projectionAttachmentMeta(row.message) }}</span></div>
+                  <strong>{{ projectionAttachmentTitle(row.message) }}</strong>
+                  <p>{{ projectionProjectLabel(row.message) }}</p>
+                  <button v-if="canOpenArtifactProjection(row.message)" class="mini artifact-open" type="button" @click="openArtifactProjection(row.message)">Open artifact</button>
+                </section>
+              </template>
+              <section v-else-if="row.rowType === 'agent-status'" class="agent-status-row" :class="['room-card', 'live']">
+                <span class="chip live">@{{ endpointLabel(row.source) }} · {{ agentStatusLabel(row) }}</span><p class="message-text">{{ row.text }}</p>
+                <details v-if="currentStatusToolList(row).length" class="agent-current-tool" :class="'tool-line'"><summary><span class="endpoint-kind-icon" :data-kind="toolInlineEndpointKind(currentStatusToolList(row)[0])" aria-hidden="true"></span>{{ toolInlineEndpointLabel(currentStatusToolList(row)[0]) }} · {{ toolInlineAction(currentStatusToolList(row)[0]) }} {{ toolInlinePayload(currentStatusToolList(row)[0]) }}</summary><span v-if="currentStatusToolList(row)[0].resultSummary" class="tool-result-summary">{{ currentStatusToolList(row)[0].resultSummary }}</span><pre aria-label="Raw payload">{{ currentStatusToolList(row)[0].argumentsText }}</pre></details>
+              </section>
+              <section v-else-if="row.rowType === 'approval'" class="approval-card" :class="['room-card', 'need']"><span class="chip need">Approval · {{ row.approval.request.risk }}</span><p class="message-text">{{ row.approval.request.summary }}</p><div class="actions"><button class="mini human" type="button" @click="decideApproval(row.approval.id, true)">Approve</button><button class="mini soft" type="button" @click="decideApproval(row.approval.id, false)">Deny</button></div></section>
+              <article v-else-if="row.rowType === 'simple'" class="message system-message"><div class="avatar">S</div><div class="message-body"><div class="message-meta"><strong>{{ endpointLabel(row.meta) }}</strong></div><p class="message-text">{{ row.text }}</p></div></article>
+            </template>
+          </div>
+          <form class="composer" @submit.prevent="submitMessage">
+            <div v-if="activeThreadId" class="thread-context"><CornerDownRight :size="15" aria-hidden="true" /><span>{{ activeThreadLabel }}</span><button class="mini soft" type="button" @click="clearActiveThread()">Clear</button></div>
+            <div class="composer-box"><textarea ref="messageInput" v-model="messageText" rows="2" autocomplete="off" placeholder="Message an agent or the room" /><button class="button" type="submit">Send</button></div>
           </form>
         </section>
 
-        <aside class="operations-pane" aria-label="Agent operations">
-          <div class="operations-header">
-            <div>
-              <p class="panel-kicker">Live work</p>
-              <h2>Operations</h2>
-            </div>
-            <span class="operation-count">{{ latestOperations.length }}</span>
-          </div>
-
-          <div class="operations-stats">
-            <div>
-              <span class="stat-value">{{ activeOperationCount }}</span>
-              <span class="stat-label">active</span>
-            </div>
-            <div>
-              <span class="stat-value">{{ pendingApprovalCount }}</span>
-              <span class="stat-label">pending</span>
-            </div>
-            <div>
-              <span class="stat-value">{{ knownAgents.length }}</span>
-              <span class="stat-label">agents</span>
-            </div>
-          </div>
-
-          <div v-if="currentOperation" class="operations-order">
-            <span>Current</span>
-            <span>Received</span>
-          </div>
-
-          <div v-if="currentOperation" class="operation-list current-operation" aria-label="Current operation">
-            <article class="operation-item" :data-state="operationState(currentOperation)">
-              <span class="operation-time">
-                <span class="operation-sequence">{{ operationSequence(currentOperation) }}</span>
-                <span class="operation-clock">{{ operationTime(currentOperation) }}</span>
-              </span>
-              <span class="operation-icon" :data-kind="operationIcon(currentOperation)">
-                <Activity v-if="operationIcon(currentOperation) === 'status'" :size="15" aria-hidden="true" />
-                <ShieldAlert v-else-if="operationIcon(currentOperation) === 'approval'" :size="15" aria-hidden="true" />
-                <TerminalSquare v-else-if="operationIcon(currentOperation) === 'terminal'" :size="15" aria-hidden="true" />
-                <Bot v-else :size="15" aria-hidden="true" />
-              </span>
-              <span class="operation-copy">
-                <span class="operation-title">{{ operationTitle(currentOperation) }}</span>
-                <span class="operation-detail">{{ operationDetail(currentOperation) }}</span>
-              </span>
-              <span class="operation-state">{{ operationState(currentOperation) }}</span>
-            </article>
-          </div>
-
-          <details v-if="previousOperations.length" class="operation-archive">
-            <summary>
-              <span>Previous operations</span>
-              <span>{{ previousOperations.length }}</span>
-            </summary>
-            <div class="operation-list archived-operations" aria-label="Previous operations">
-              <article
-                v-for="row in previousOperations"
-                :key="row.id"
-                class="operation-item"
-                :data-state="operationState(row)"
-              >
-                <span class="operation-time">
-                  <span class="operation-sequence">{{ operationSequence(row) }}</span>
-                  <span class="operation-clock">{{ operationTime(row) }}</span>
-                </span>
-                <span class="operation-icon" :data-kind="operationIcon(row)">
-                  <Activity v-if="operationIcon(row) === 'status'" :size="15" aria-hidden="true" />
-                  <ShieldAlert v-else-if="operationIcon(row) === 'approval'" :size="15" aria-hidden="true" />
-                  <TerminalSquare v-else-if="operationIcon(row) === 'terminal'" :size="15" aria-hidden="true" />
-                  <Bot v-else :size="15" aria-hidden="true" />
-                </span>
-                <span class="operation-copy">
-                  <span class="operation-title">{{ operationTitle(row) }}</span>
-                  <span class="operation-detail">{{ operationDetail(row) }}</span>
-                </span>
-                <span class="operation-state">{{ operationState(row) }}</span>
-              </article>
-            </div>
-          </details>
-          <div v-if="!currentOperation" class="operations-empty">
-            <Activity :size="16" aria-hidden="true" />
-            <span>No agent activity yet.</span>
-          </div>
-
-          <button class="trace-link" type="button" @click="openTraceViewer">
-            <Activity :size="15" aria-hidden="true" />
-            <span>Open trace</span>
-          </button>
+        <aside class="stack">
+          <section class="panel"><h3>Projects discussed here</h3><button v-for="session in roomProjectCards" :key="session.session_id" class="room-row" type="button" @click="openSessionDetail(session)"><strong>{{ session.title }}</strong><p>{{ projectAttentionText(session) }} · {{ projectLaneLabelForSession(session) }}</p></button><p v-if="!roomProjectCards.length">No linked Project cards in this room yet.</p></section>
+          <section class="panel"><h3>Current operation</h3><div v-if="currentOperation" class="mono-line"><code>{{ operationState(currentOperation) }}</code><code>{{ operationTitle(currentOperation) }}</code><span>{{ operationDetail(currentOperation) }}</span></div><p v-else>No agent activity yet.</p><button class="mini soft" type="button" @click="openTraceViewer">Open Observe</button></section>
         </aside>
-      </div>
+      </section>
 
-      <div v-else-if="activeView === 'agent'" class="agent-dashboard">
-        <section class="agent-workload-panel" aria-label="Agent workload">
-          <div class="dashboard-list-header agent-workload-header">
-            <span>Session</span>
-            <span>Phase</span>
-            <span>Delegation</span>
+      <section v-else-if="activeView === 'agent'" class="content">
+        <div class="table-shell">
+          <div class="row header"><span>Agent</span><span>Project responsibility</span><span>State</span><span>Latest IPC</span><span>Action</span></div>
+          <div v-for="item in agentRuntimeRows" :key="item.agent" class="row">
+            <strong>{{ agentLabel(item.agent) }}<br><span>{{ item.agent }}</span></strong>
+            <span>{{ item.project?.title || item.workload?.sessions[0]?.session_title || 'No active Project responsibility' }}</span>
+            <span class="chip" :class="agentRowState(item.agent) === 'running' || agentRowState(item.agent) === 'streaming' ? 'live' : agentRowState(item.agent) === 'blocked' || agentRowState(item.agent) === 'errored' ? 'bad' : ''">{{ agentRowState(item.agent) }}</span>
+            <div class="mono-line"><code>{{ endpointLabel(item.agent) }}</code><code>ipc</code><span>{{ agentLatestIpc(item.agent) }}</span></div>
+            <button class="mini primary" type="button" @click="openAgentDashboard(item.agent)">Open</button>
           </div>
-          <div v-if="activeAgentWorkSessions.length" class="agent-workload-list">
-            <button
-              v-for="item in activeAgentWorkSessions"
-              :key="item.session.session_id"
-              class="agent-workload-item"
-              type="button"
-              @click="openSessionThread(item.session)"
-            >
-              <span class="agent-workload-title">{{ item.session.title }}</span>
-              <span class="work-phase" :data-phase="sessionPhaseClass(item.session)">{{ item.session.phase_label }}</span>
-              <span class="dashboard-muted">{{ item.assignments[0]?.current_work || delegationStatusLabel(item.assignments[0]?.status || '') }}</span>
-            </button>
-          </div>
-          <div v-else class="dashboard-empty compact-empty">
-            <div class="dashboard-empty-text">No session delegation is assigned to this agent yet.</div>
-          </div>
-        </section>
-
-        <div class="dashboard-summary">
-          <div class="metric">
-            <div class="metric-label">activities</div>
-            <div class="metric-value">{{ activeAgentRows.length }}</div>
-          </div>
-          <div class="metric">
-            <div class="metric-label">tool calls</div>
-            <div class="metric-value">{{ activeAgentToolCount }}</div>
-          </div>
-          <div class="metric">
-            <div class="metric-label">approvals</div>
-            <div class="metric-value">{{ activeAgentApprovalCount }}</div>
-          </div>
+          <div v-if="!agentRuntimeRows.length" class="panel empty-panel"><h3>No agents yet</h3><p>Agents appear after a room run starts.</p></div>
         </div>
+      </section>
 
-        <div class="dashboard-list">
-          <div class="dashboard-list-header">
-            <span>Status</span>
-            <span>Operation</span>
-            <span>Target</span>
-            <span>Thread</span>
-            <span>Channel</span>
-          </div>
-          <template v-for="row in activeAgentRows" :key="row.id">
-            <article v-if="row.rowType === 'agent-status'" class="dashboard-status">
-              <span class="tool-state" :data-state="agentStatusVisualState(row)">{{ agentStatusLabel(row) }}</span>
-              <span class="dashboard-primary">{{ row.text }}</span>
-              <span class="dashboard-secondary">{{ agentRunDuration(row) || 'runtime' }}</span>
-              <span class="dashboard-mono">{{ row.threadId }}</span>
-              <span class="dashboard-muted">{{ fallbackDash(row.channel) }}</span>
-            </article>
-
-            <article v-else class="dashboard-tool" :data-state="row.state">
-              <details class="dashboard-details" :open="row.open" @toggle="syncToolOpen(row, $event)">
-                <summary class="dashboard-row-summary">
-                  <span class="tool-state" :data-state="row.state">{{ row.state }}</span>
-                  <span class="dashboard-primary">
-                    <span class="tool-name">{{ toolOperation(row) }}</span>
-                    <span class="tool-preview">{{ row.preview }}</span>
-                  </span>
-                  <span class="dashboard-secondary">{{ toolTarget(row) }}</span>
-                  <span class="dashboard-mono">{{ row.threadId }}</span>
-                  <span class="dashboard-muted">{{ fallbackDash(row.channel) }}</span>
-                </summary>
-
-                <div class="dashboard-detail-body">
-                  <div class="dashboard-meta">
-                    <span>{{ row.toolCallId }}</span>
-                    <span>{{ row.threadId }}</span>
-                    <span v-if="row.channel">{{ row.channel }}</span>
-                  </div>
-
-                  <details class="raw-details tool-section">
-                    <summary>Arguments</summary>
-                    <pre class="tool-pre">{{ row.argumentsText }}</pre>
-                  </details>
-
-                  <div v-if="row.approval" class="tool-section tool-approval" :data-approval-id="row.approval.id">
-                    <div class="approval-header">
-                      <span class="approval-status" :data-state="approvalState(row)">{{ approvalLabel(row) }}</span>
-                      <span class="grant-summary">{{ grantSummary(row.approvalResult) }}</span>
-                    </div>
-                    <div class="approval-card">
-                      <div class="approval-summary-line">{{ approvalRiskLabel(row.approval) }}: {{ row.approval.request.summary }}</div>
-                      <div class="approval-target-line">{{ approvalPayloadSummary(row.approval) }}</div>
-                      <div class="approval-chip-row">
-                        <span v-for="chip in approvalDetailChips(row.approval)" :key="chip" class="approval-chip">{{ chip }}</span>
-                      </div>
-                    </div>
-                    <template v-if="diffPreview(row.approval)">
-                      <div class="tool-section-label">Diff Preview</div>
-                      <pre class="tool-pre">{{ diffPreview(row.approval) }}</pre>
-                    </template>
-                    <details class="raw-details">
-                      <summary>Raw payload</summary>
-                      <pre class="tool-pre">{{ approvalRawPayload(row.approval) }}</pre>
-                    </details>
-                    <div v-if="!row.approvalResult" class="approval-actions">
-                      <button type="button" data-decision="approve" @click="decideApproval(row.approval.id, true)">
-                        <Check :size="14" aria-hidden="true" />
-                        <span>Approve</span>
-                      </button>
-                      <button type="button" data-decision="deny" @click="decideApproval(row.approval.id, false)">
-                        <X :size="14" aria-hidden="true" />
-                        <span>Deny</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  <div v-if="row.resultText !== undefined" class="tool-section tool-result-section">
-                    <div class="tool-section-label">Result</div>
-                    <div class="tool-result-summary">{{ row.resultSummary }}</div>
-                    <details v-if="row.resultText !== row.resultSummary" class="raw-details">
-                      <summary>Result detail</summary>
-                      <pre class="tool-pre tool-result">{{ row.resultText }}</pre>
-                    </details>
-                  </div>
-                </div>
-              </details>
-            </article>
-          </template>
-          <div v-if="!activeAgentRows.length" class="dashboard-empty">
-            <div class="dashboard-empty-title">No activity yet</div>
-            <div class="dashboard-empty-text">Agent status and tool calls will appear here during a run.</div>
-          </div>
+      <section v-else-if="activeView === 'trace'" class="trace-view" :class="['content', 'two-col']">
+        <div class="stack">
+          <div class="trace-controls atlas-trace-controls"><label class="trace-filter"><span><Search :size="13" aria-hidden="true" /> Search</span><input v-model="traceQuery" class="trace-input" type="search" autocomplete="off" @keydown.enter.prevent="refreshTrace" /></label><label class="trace-filter trace-limit"><span>Limit</span><input v-model.number="traceLimit" class="trace-input" type="number" min="1" max="1000" step="25" @keydown.enter.prevent="refreshTrace" /></label><button class="button-tonal" type="button" :disabled="traceState.loading" @click="refreshTrace">Apply</button></div>
+          <div class="table-shell"><div class="row header"><span>Trace group</span><span>Runtime state</span><span>Latest IPC</span><span>Linked object</span><span>Evidence</span></div><div v-for="event in observeAuditEvents.slice(0, 8)" :key="event.id" class="row"><strong>{{ traceGroupLabel(event) }}<br><span>{{ formatTraceTime(event.timestamp) }}</span></strong><span>{{ event.label }}</span><div class="mono-line"><code>{{ traceEndpoint(event) }}</code><code>{{ traceOperation(event) }}</code><span>{{ event.detail || tracePrimaryLine(event) }}</span></div><span>{{ traceChips(event)[0] || traceRoute(event) }}</span><button class="mini primary" type="button" @click="traceQuery = traceGroupLabel(event); refreshTrace()">Trace</button></div></div>
+          <div v-if="traceState.error" class="panel bad-panel"><h3>Observe error</h3><p>{{ traceState.error }}</p></div>
+          <div v-else-if="!traceState.available" class="panel empty-panel"><h3>Observe unavailable</h3><p>Trace is not configured for this bridge.</p></div>
+          <div v-else-if="!traceState.events.length" class="panel empty-panel"><h3>No runtime audit events yet</h3><p>Trace events will appear when IPC traffic starts.</p></div>
+          <div v-else class="trace-event-stream" :class="'trace-list'"><article v-for="event in observeAuditEvents" :key="event.id" class="trace-event"><span class="trace-time">{{ formatTraceTime(event.timestamp) }}</span><span class="trace-dot" :class="{ bad: traceIsIssue(event), good: traceRoute(event) === 'delivered' }"></span><div class="trace-body"><strong>{{ tracePrimaryLine(event) }}</strong><span>{{ event.detail || event.label }}</span></div></article></div>
         </div>
-      </div>
-
-      <div v-else-if="activeView === 'trace'" class="trace-view">
-        <div class="trace-controls">
-          <label class="trace-filter">
-            <span><Search :size="13" aria-hidden="true" /> Search</span>
-            <input v-model="traceQuery" class="trace-input" type="search" autocomplete="off" @keydown.enter.prevent="refreshTrace" />
-          </label>
-          <label class="trace-filter trace-limit">
-            <span>Limit</span>
-            <input v-model.number="traceLimit" class="trace-input" type="number" min="1" max="1000" step="25" @keydown.enter.prevent="refreshTrace" />
-          </label>
-          <button class="ghost icon-label" type="button" :disabled="traceState.loading" @click="refreshTrace">
-            <RefreshCw :size="15" aria-hidden="true" />
-            <span>Apply</span>
-          </button>
-        </div>
-
-        <div v-if="traceState.tracePath" class="trace-path">{{ traceState.tracePath }}</div>
-
-        <div class="trace-glance" aria-label="Trace summary">
-          <span class="trace-glance-chip" :data-tone="traceIssueCount ? 'issue' : 'ok'">
-            <span>{{ traceIssueCount }}</span>
-            <span>issues</span>
-          </span>
-          <span class="trace-glance-chip">
-            <span>{{ traceMetric(traceState.stats.total_events) }}</span>
-            <span>events</span>
-          </span>
-          <span class="trace-glance-chip">
-            <span>{{ traceMetric(traceState.stats.approvals) }}</span>
-            <span>approvals</span>
-          </span>
-          <span class="trace-glance-chip">
-            <span>{{ traceRouteCount('dropped') + traceRouteCount('rejected') }}</span>
-            <span>blocked</span>
-          </span>
-          <span class="trace-glance-note">{{ traceMetric(traceState.stats.group_count) }} relation groups</span>
-        </div>
-
-        <div v-if="traceState.error" class="trace-empty trace-error">{{ traceState.error }}</div>
-        <div v-else-if="!traceState.available" class="trace-empty">Trace is not configured for this bridge.</div>
-        <div v-else-if="!traceState.events.length" class="trace-empty">No trace events yet.</div>
-        <div v-else class="trace-event-stream" aria-label="Trace event stream">
-          <article
-            v-for="event in traceState.events"
-            :key="event.id"
-            class="trace-event"
-            :data-route="traceRoute(event)"
-            :data-direction="traceDirection(event)"
-            :data-tone="traceTone(event)"
-            :style="traceDepthStyle(event)"
-          >
-            <div class="trace-event-rail" aria-hidden="true">
-              <span class="trace-lane"><span class="trace-node"></span></span>
-            </div>
-            <div class="trace-event-body">
-              <div class="trace-event-main">
-                <span class="trace-time">{{ formatTraceTime(event.timestamp) }}</span>
-                <span class="trace-route-badge" :data-route="traceRoute(event)">{{ traceRoute(event) }}</span>
-                <span class="trace-direction">{{ traceDirection(event) }}</span>
-                <span class="trace-primary">{{ tracePrimaryLine(event) }}</span>
-              </div>
-              <div class="trace-event-detail">
-                <span class="trace-detail-title">{{ event.label }}</span>
-                <span v-if="event.detail" class="trace-detail-text">{{ event.detail }}</span>
-              </div>
-              <div class="trace-event-meta">
-                <button class="trace-relation-chip compact" type="button" @click="traceQuery = traceGroupLabel(event); refreshTrace()">
-                  group {{ traceGroupLabel(event) }}
-                </button>
-                <span v-if="traceParent(event)" class="trace-chip">parent {{ traceParent(event) }}</span>
-                <button
-                  v-for="relation in traceRelations(event)"
-                  :key="relation.kind + ':' + relation.value"
-                  class="trace-relation-chip compact"
-                  type="button"
-                  @click="filterTraceRelation(relation)"
-                >
-                  {{ relation.label }}
-                </button>
-                <span v-for="chip in traceChips(event)" :key="chip" class="trace-chip">{{ chip }}</span>
-              </div>
-            </div>
-          </article>
-        </div>
-      </div>
+        <aside class="stack"><section class="panel"><h3>Runtime audit</h3><p>{{ traceStatus }}</p><p v-if="traceState.tracePath">{{ traceState.tracePath }}</p></section><section class="panel"><h3>Endpoint health</h3><p>{{ traceMetric(traceState.stats.total_events) }} events, {{ traceMetric(traceState.stats.approvals) }} approvals, {{ traceRouteCount('dropped') + traceRouteCount('rejected') }} blocked.</p></section></aside>
+      </section>
     </section>
   </main>
+
 </template>

@@ -1,0 +1,63 @@
+identity:
+  name: review_artifact
+  author: tomiya
+  label:
+    en_US: Review Kairos artifact
+    zh_Hans: 审阅 Kairos artifact
+description:
+  human:
+    en_US: Accept, reject, or request revision for a Kairos artifact.
+    zh_Hans: 接受、拒绝或请求修改 Kairos artifact。
+  llm: Record a review decision for an artifact.
+parameters:
+  - name: artifact_id
+    type: string
+    required: true
+    label:
+      en_US: Artifact id
+      zh_Hans: Artifact id
+    form: llm
+  - name: status
+    type: select
+    required: true
+    label:
+      en_US: Status
+      zh_Hans: 状态
+    options:
+      - value: accepted
+        label:
+          en_US: Accepted
+          zh_Hans: 接受
+      - value: rejected
+        label:
+          en_US: Rejected
+          zh_Hans: 拒绝
+      - value: revision_requested
+        label:
+          en_US: Revision requested
+          zh_Hans: 请求修改
+    form: llm
+  - name: session_id
+    type: string
+    required: false
+    label:
+      en_US: Session id
+      zh_Hans: Session id
+    form: llm
+  - name: note
+    type: string
+    required: false
+    label:
+      en_US: Note
+      zh_Hans: 备注
+    form: llm
+  - name: revision_instruction
+    type: string
+    required: false
+    label:
+      en_US: Revision instruction
+      zh_Hans: 修改指令
+    form: llm
+extra:
+  python:
+    source: tools/review_artifact.py

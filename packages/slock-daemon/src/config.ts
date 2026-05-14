@@ -60,6 +60,38 @@ export interface SlockWebDaemonConfig {
     default_agent_ttl_ms?: number;
     coordinator_uri?: EndpointUri;
   };
+  dify_bridge?: {
+    enabled?: boolean;
+    host?: string;
+    port?: number;
+    auth_token?: string;
+    auth_token_env?: string;
+    allowed_origins?: string[];
+    max_body_bytes?: number;
+    allow_unauthenticated?: boolean;
+  };
+  mattermost_bridge?: {
+    enabled?: boolean;
+    host?: string;
+    port?: number;
+    public_url?: string;
+    mattermost_base_url?: string;
+    bot_token?: string;
+    bot_token_env?: string;
+    slash_command_token?: string;
+    slash_command_token_env?: string;
+    allowed_team_ids?: string[];
+    allowed_user_ids?: string[];
+    allowed_origins?: string[];
+    require_origin?: boolean;
+    max_body_bytes?: number;
+    mattermost_request_timeout_ms?: number;
+    callback_token_ttl_ms?: number;
+    max_projection_posts?: number;
+    allowed_agent_uris?: EndpointUri[];
+    default_agents?: EndpointUri[];
+    agent_aliases?: Record<string, EndpointUri | EndpointUri[]>;
+  };
   agent?: SlockWebAgentConfig;
   agents?: SlockWebAgentConfig[];
   plugins?: {
@@ -129,7 +161,7 @@ export function loadSlockWebDaemonConfig(options: LoadSlockWebDaemonConfigOption
   const cwd = options.cwd ?? process.cwd();
   const configPath = readOption(argv, "--config") ?? env.KAIROS_IPC_CONFIG;
   const fileConfig = configPath ? readSlockWebDaemonConfigFile(resolve(cwd, configPath)) : {};
-  return resolveSlockWebDaemonConfig(mergeSlockWebDaemonConfig(fileConfig, configFromCliAndEnv(argv, env)), cwd);
+  return resolveSlockWebDaemonConfig(mergeSlockWebDaemonConfig(fileConfig, configFromCliAndEnv(argv, env)), cwd, env);
 }
 
 export function readSlockWebDaemonConfigFile(path: string): Partial<SlockWebDaemonConfig> {
@@ -150,7 +182,11 @@ export function mergeSlockWebDaemonConfig(...configs: Array<Partial<SlockWebDaem
   return merged as SlockWebDaemonConfig;
 }
 
-export function resolveSlockWebDaemonConfig(config: Partial<SlockWebDaemonConfig> = {}, cwd = process.cwd()): SlockWebDaemonConfig {
+export function resolveSlockWebDaemonConfig(
+  config: Partial<SlockWebDaemonConfig> = {},
+  cwd = process.cwd(),
+  env: Record<string, string | undefined> = process.env,
+): SlockWebDaemonConfig {
   const agents = normalizeAgents(config);
   const primaryAgent = agents[0];
   const mode = primaryAgent.mode ?? "pi";
@@ -160,10 +196,30 @@ export function resolveSlockWebDaemonConfig(config: Partial<SlockWebDaemonConfig
   const calculatorUri = config.plugins?.calculator?.uri ?? "plugin://demo/calculator";
   const browserUri = config.plugins?.browser?.uri ?? "plugin://local/browser";
   const memoryUri = config.plugins?.memory?.uri ?? "plugin://memory/reme";
-  const memoryBaseUrl = config.plugins?.memory?.base_url ?? readEnv(config.plugins?.memory?.base_url_env);
+  const memoryBaseUrl = config.plugins?.memory?.base_url ?? readEnv(config.plugins?.memory?.base_url_env, env);
   const mentionAliases = config.channel?.mention_aliases ?? defaultMentionAliases(agents);
   const channels = normalizeChannels(config, mentionAliases);
   const channelUri = channels[0]?.uri ?? "app://slock/channel/general";
+  const difyBridgeEnabled = config.dify_bridge?.enabled === true;
+  const difyBridgeAuthToken = difyBridgeEnabled
+    ? config.dify_bridge?.auth_token
+      ?? readEnv(config.dify_bridge?.auth_token_env, env)
+      ?? env.KAIROS_DIFY_BRIDGE_TOKEN
+    : config.dify_bridge?.auth_token;
+  const mattermostBridgeEnabled = config.mattermost_bridge?.enabled === true;
+  const mattermostBotToken = mattermostBridgeEnabled
+    ? config.mattermost_bridge?.bot_token
+      ?? readEnv(config.mattermost_bridge?.bot_token_env, env)
+      ?? env.KAIROS_MATTERMOST_BOT_TOKEN
+    : config.mattermost_bridge?.bot_token;
+  const mattermostSlashCommandToken = mattermostBridgeEnabled
+    ? config.mattermost_bridge?.slash_command_token
+      ?? readEnv(config.mattermost_bridge?.slash_command_token_env, env)
+      ?? env.KAIROS_MATTERMOST_SLASH_TOKEN
+    : config.mattermost_bridge?.slash_command_token;
+  if (mattermostBridgeEnabled && !mattermostSlashCommandToken) {
+    throw new Error("mattermost_bridge.slash_command_token is required when mattermost_bridge.enabled is true");
+  }
 
   return {
     host: config.host ?? "127.0.0.1",
@@ -187,6 +243,38 @@ export function resolveSlockWebDaemonConfig(config: Partial<SlockWebDaemonConfig
       session_manager_uri: config.collaboration?.session_manager_uri ?? "app://kairos/session-manager",
       default_agent_ttl_ms: config.collaboration?.default_agent_ttl_ms,
       coordinator_uri: config.collaboration?.coordinator_uri,
+    },
+    dify_bridge: {
+      enabled: difyBridgeEnabled,
+      host: config.dify_bridge?.host ?? "127.0.0.1",
+      port: config.dify_bridge?.port ?? 5180,
+      auth_token: difyBridgeAuthToken,
+      auth_token_env: config.dify_bridge?.auth_token_env,
+      allowed_origins: config.dify_bridge?.allowed_origins,
+      max_body_bytes: config.dify_bridge?.max_body_bytes,
+      allow_unauthenticated: config.dify_bridge?.allow_unauthenticated,
+    },
+    mattermost_bridge: {
+      enabled: mattermostBridgeEnabled,
+      host: config.mattermost_bridge?.host ?? "127.0.0.1",
+      port: config.mattermost_bridge?.port ?? 5190,
+      public_url: config.mattermost_bridge?.public_url,
+      mattermost_base_url: config.mattermost_bridge?.mattermost_base_url,
+      bot_token: mattermostBotToken,
+      bot_token_env: config.mattermost_bridge?.bot_token_env,
+      slash_command_token: mattermostSlashCommandToken,
+      slash_command_token_env: config.mattermost_bridge?.slash_command_token_env,
+      allowed_team_ids: config.mattermost_bridge?.allowed_team_ids,
+      allowed_user_ids: config.mattermost_bridge?.allowed_user_ids,
+      allowed_origins: config.mattermost_bridge?.allowed_origins,
+      require_origin: config.mattermost_bridge?.require_origin,
+      max_body_bytes: config.mattermost_bridge?.max_body_bytes,
+      mattermost_request_timeout_ms: config.mattermost_bridge?.mattermost_request_timeout_ms,
+      callback_token_ttl_ms: config.mattermost_bridge?.callback_token_ttl_ms,
+      max_projection_posts: config.mattermost_bridge?.max_projection_posts,
+      allowed_agent_uris: config.mattermost_bridge?.allowed_agent_uris,
+      default_agents: config.mattermost_bridge?.default_agents,
+      agent_aliases: config.mattermost_bridge?.agent_aliases,
     },
     agent: primaryAgent,
     agents,
@@ -319,6 +407,20 @@ function configFromCliAndEnv(argv: string[], env: Record<string, string | undefi
         base_url: readOption(argv, "--reme-base-url") ?? env.KAIROS_IPC_REME_BASE_URL,
         workspace_id: readOption(argv, "--memory-workspace") ?? env.KAIROS_IPC_MEMORY_WORKSPACE_ID,
       },
+    },
+    dify_bridge: {
+      enabled: readFlag(argv, "--dify-bridge"),
+      port: readNumberOption(argv, "--dify-port"),
+      auth_token: readOption(argv, "--dify-auth-token"),
+    },
+    mattermost_bridge: {
+      enabled: readFlag(argv, "--mattermost-bridge"),
+      host: readOption(argv, "--mattermost-host"),
+      port: readNumberOption(argv, "--mattermost-port"),
+      public_url: readOption(argv, "--mattermost-public-url") ?? env.KAIROS_MATTERMOST_BRIDGE_PUBLIC_URL,
+      mattermost_base_url: readOption(argv, "--mattermost-base-url") ?? env.KAIROS_MATTERMOST_BASE_URL,
+      bot_token: readOption(argv, "--mattermost-bot-token"),
+      slash_command_token: readOption(argv, "--mattermost-slash-token"),
     },
   };
 }
@@ -465,8 +567,12 @@ function readNumberOption(argv: string[], name: string): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
 
-function readEnv(name: string | undefined): string | undefined {
-  return name ? process.env[name] : undefined;
+function readFlag(argv: string[], name: string): boolean | undefined {
+  return argv.includes(name) ? true : undefined;
+}
+
+function readEnv(name: string | undefined, env: Record<string, string | undefined>): string | undefined {
+  return name ? env[name] : undefined;
 }
 
 function mergeRecord(left: Record<string, unknown>, right: Record<string, unknown>): Record<string, unknown> {

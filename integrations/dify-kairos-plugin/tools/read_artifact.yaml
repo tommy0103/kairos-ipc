@@ -1,0 +1,29 @@
+identity:
+  name: read_artifact
+  author: tomiya
+  label:
+    en_US: Read Kairos artifact
+    zh_Hans: 读取 Kairos artifact
+description:
+  human:
+    en_US: Read the full body of a Kairos artifact.
+    zh_Hans: 读取 Kairos artifact 的完整正文。
+  llm: Read a full artifact body by artifact id.
+parameters:
+  - name: artifact_id
+    type: string
+    required: true
+    label:
+      en_US: Artifact id
+      zh_Hans: Artifact id
+    form: llm
+  - name: session_id
+    type: string
+    required: false
+    label:
+      en_US: Session id
+      zh_Hans: Session id
+    form: llm
+extra:
+  python:
+    source: tools/read_artifact.py

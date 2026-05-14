@@ -1,0 +1,22 @@
+identity:
+  name: get_session
+  author: tomiya
+  label:
+    en_US: Get Kairos session
+    zh_Hans: 获取 Kairos session
+description:
+  human:
+    en_US: Read a compact Kairos session summary.
+    zh_Hans: 读取简洁的 Kairos session 摘要。
+  llm: Get a compact session summary with phase, agents, blockers, artifacts, and approvals.
+parameters:
+  - name: session_id
+    type: string
+    required: true
+    label:
+      en_US: Session id
+      zh_Hans: Session id
+    form: llm
+extra:
+  python:
+    source: tools/get_session.py

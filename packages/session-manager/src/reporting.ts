@@ -3,7 +3,10 @@ import type { CollaborationNote, CollaborationNoteVisibility, SourceRef } from "
 import { uniqueSourceRefsForSession } from "./helpers.ts";
 import type { SessionManagerReportMessageRequest, SessionRecord } from "./types.ts";
 
-export const HUMAN_REPORT_MESSAGE_MAX_CHARS = 80;
+export const HUMAN_PROGRESS_MESSAGE_MAX_CHARS = 80;
+export const LEGACY_FINAL_SUMMARY_MIN_LINES = 2;
+export const LEGACY_FINAL_SUMMARY_MAX_LINES = 4;
+export const LEGACY_FINAL_SUMMARY_LINE_MAX_CHARS = 96;
 
 const HUMAN_REPORT_MARKDOWN_PATTERN = /```|^\s{0,3}#{1,6}\s|^\s*[-*+]\s|^\s*\d+[.)]\s|\|\s*[-:]{3,}\s*\|/m;
 
@@ -45,26 +48,36 @@ export function noteProjectsToHuman(note: CollaborationNote): boolean {
   return note.visibility === "human" || note.visibility === "all";
 }
 
-export function hasHumanReportForDelegation(record: SessionRecord, delegationId: string): boolean {
-  return record.events.some((event) => {
-    return event.type === "note_posted"
-      && event.note.delegation_id === delegationId
-      && noteProjectsToHuman(event.note);
-  });
-}
-
-export function enforceReportMessageContract(text: string, visibility: CollaborationNote["visibility"]): void {
+export function enforceReportMessageContract(text: string, visibility: CollaborationNote["visibility"], purpose: CollaborationNote["purpose"]): void {
   if (visibility !== "human" && visibility !== "all") {
     return;
-  }
-  if (reportMessageCharacterCount(text) > HUMAN_REPORT_MESSAGE_MAX_CHARS) {
-    throw new Error(`human-visible report_message must be a brief IM status under ${HUMAN_REPORT_MESSAGE_MAX_CHARS} characters; submit detailed content as an artifact`);
   }
   if (HUMAN_REPORT_MARKDOWN_PATTERN.test(text)) {
     throw new Error("human-visible report_message must be plain text without Markdown headings, lists, tables, or code fences");
   }
+  if (purpose === "final_summary") {
+    enforceLegacyFinalSummaryContract(text);
+    return;
+  }
+  if (reportMessageCharacterCount(text) > HUMAN_PROGRESS_MESSAGE_MAX_CHARS) {
+    throw new Error(`human-visible report_message must be under ${HUMAN_PROGRESS_MESSAGE_MAX_CHARS} characters; use the final result summary and artifact for more detail`);
+  }
   if (/\r|\n/.test(text)) {
     throw new Error("human-visible report_message must be one brief IM status line");
+  }
+}
+
+function enforceLegacyFinalSummaryContract(text: string): void {
+  const lines = text.split(/\r?\n/).map((line) => line.trim());
+  if (lines.some((line) => line.length === 0)) {
+    throw new Error("legacy final_summary report_message must use compact non-empty lines without blank spacing");
+  }
+  if (lines.length < LEGACY_FINAL_SUMMARY_MIN_LINES || lines.length > LEGACY_FINAL_SUMMARY_MAX_LINES) {
+    throw new Error(`legacy final_summary report_message must use ${LEGACY_FINAL_SUMMARY_MIN_LINES}-${LEGACY_FINAL_SUMMARY_MAX_LINES} compact lines`);
+  }
+  const longLine = lines.find((line) => reportMessageCharacterCount(line) > LEGACY_FINAL_SUMMARY_LINE_MAX_CHARS);
+  if (longLine) {
+    throw new Error(`legacy final_summary report_message lines must stay under ${LEGACY_FINAL_SUMMARY_LINE_MAX_CHARS} characters`);
   }
 }
 
