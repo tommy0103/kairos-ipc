@@ -4,26 +4,28 @@
 
 Kairos IPC uses a restrained product UI system for a Slack-like collaboration surface where humans and agents work in the same room. The default scene is an all-day desktop work session in ordinary office light: reading messages, checking agent status, approving tool use, and inspecting traces. The interface should be light, quiet, and highly scannable.
 
-This system intentionally moves away from the current Slack-purple inheritance. Use tinted neutrals, one teal accent, and semantic state colors only where state needs to be understood.
+This system intentionally moves away from the current Slack-purple inheritance. Use clear blue-white tinted neutrals, one crisp blue accent, and semantic state colors only where state needs to be understood.
 
 ## Color Strategy
 
 Use OKLCH-first tokens. The product default is restrained: tinted neutral surfaces plus one accent used for primary actions, selected navigation, focus rings, and active state. Accent should stay under roughly 10 percent of the visible surface on normal work screens.
 
-Do not use pure black or pure white. Neutrals should keep a subtle blue-green tint so the surface feels coherent without becoming monochrome.
+Do not use pure black or pure white. Neutrals should keep a subtle cool-blue tint, but large surfaces should stay high-lightness and low-chroma so the app feels airy rather than gray.
+
+The primary accent hue follows the local Chromatix model in `packages/chromatix`: use a clear blue hue near `244` and derive the 50, 100, 200, 300, 400, 500, 600, 700, 800, 900, and 950 shade levels from the default lightness and chroma multiplier curve. App surfaces should map those shades through product tokens first rather than hard-coding isolated OKLCH values.
 
 ## Core Palette
 
-| Token | Role | OKLCH | Hex |
+| Token | Role | OKLCH | Note |
 | --- | --- | --- | --- |
-| `canvas` | Main app background | `oklch(98% 0.006 190)` | `#f7faf9` |
-| `surface` | Sidebar, toolbar, quiet panels | `oklch(95% 0.010 190)` | `#edf3f1` |
-| `surface-strong` | Hover, selected rows, raised neutral areas | `oklch(91% 0.014 190)` | `#dde8e5` |
-| `border` | Dividers, input borders, separators | `oklch(84% 0.018 190)` | `#c7d5d1` |
-| `muted` | Timestamps, metadata, secondary labels | `oklch(53% 0.026 205)` | `#637476` |
-| `text` | Default body and control text | `oklch(31% 0.018 210)` | `#334044` |
-| `ink` | Strong headings, active icons, high-emphasis text | `oklch(20% 0.014 220)` | `#20292d` |
-| `accent` | Primary action, current channel, focus, active state | `oklch(58% 0.115 178)` | `#087f78` |
+| `canvas` | Main app background | `oklch(99.1% 0.004 238)` | clear blue-white paper |
+| `surface` | Sidebar, toolbar, quiet panels | `oklch(98.2% 0.008 238)` | airy blue surface |
+| `surface-strong` | Hover, selected rows, raised neutral areas | `oklch(95.6% 0.012 238)` | light blue wash |
+| `border` | Dividers, input borders, separators | `oklch(90.5% 0.014 238)` | thin blue-gray line |
+| `muted` | Timestamps, metadata, secondary labels | `oklch(47% 0.033 238)` | blue-gray text |
+| `text` | Default body and control text | `oklch(30% 0.027 238)` | blue-black text |
+| `ink` | Strong headings, active icons, high-emphasis text | `oklch(19% 0.026 238)` | deep blue ink |
+| `accent` | Primary action, current channel, focus, active state | Chromatix blue `600` at hue `244` | primary blue |
 
 ## Semantic Colors
 
@@ -32,9 +34,9 @@ Semantic colors sit outside the eight core shades. Use them sparingly and pair t
 | Token | Role | OKLCH |
 | --- | --- | --- |
 | `success` | Completed tool calls, approved actions | `oklch(62% 0.120 150)` |
-| `warning` | Pending approval, moderate risk, stale state | `oklch(72% 0.125 72)` |
+| `warning` | Pending approval, moderate risk, stale state | rose-coral `oklch(66% 0.145 350)`, concentrate contrast in chips, markers, text, and lines before using filled surfaces |
 | `danger` | Rejected approval, failed action, destructive risk | `oklch(58% 0.155 25)` |
-| `info` | Trace hints, system notices, neutral updates | `oklch(60% 0.105 225)` |
+| `info` | Trace hints, system notices, neutral updates | Chromatix blue `500` at hue `244` |
 | `agent-thinking` | Streaming or planning activity | `oklch(68% 0.105 92)` |
 
 ## Typography

@@ -30,11 +30,11 @@
 }
 
 .agent-state.warn {
-  color: oklch(44% 0.08 76);
+  color: var(--kd-attention-text);
 }
 
 .agent-state.warn .agent-state-dot {
-  background: var(--kd-amber);
+  background: var(--kd-attention);
 }
 
 .agent-state.success {
@@ -74,7 +74,7 @@
 .agent-blockers ul {
   margin: 4px 0 0;
   padding-left: 16px;
-  color: oklch(44% 0.08 76);
+  color: var(--kd-attention-text);
   font-size: 13px;
   line-height: 19px;
 }

@@ -65,7 +65,7 @@
   border: 1px solid var(--kd-border-strong);
   border-radius: 6px;
   background: var(--kd-panel);
-  box-shadow: 0 14px 36px oklch(18% 0.025 255 / 0.15), 0 2px 8px oklch(18% 0.025 255 / 0.08);
+  box-shadow: 0 14px 36px oklch(18% 0.024 var(--kd-neutral-hue) / 0.15), 0 2px 8px oklch(18% 0.024 var(--kd-neutral-hue) / 0.08);
 }
 
 .artifact-more-panel button {
@@ -262,7 +262,7 @@
 }
 
 .source-ref-link span:last-child {
-  color: oklch(57% 0.035 255 / 0.72);
+  color: var(--kd-muted);
   font-size: 10px;
   font-weight: var(--kd-weight-medium);
   letter-spacing: 0.04em;
@@ -278,7 +278,7 @@
   border: 1px solid var(--kd-border-strong);
   border-radius: 7px;
   background: var(--kd-panel);
-  box-shadow: 0 16px 42px oklch(18% 0.025 255 / 0.18), 0 2px 10px oklch(18% 0.025 255 / 0.08);
+  box-shadow: 0 16px 42px oklch(18% 0.024 var(--kd-neutral-hue) / 0.18), 0 2px 10px oklch(18% 0.024 var(--kd-neutral-hue) / 0.08);
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;

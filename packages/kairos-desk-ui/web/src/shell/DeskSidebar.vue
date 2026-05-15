@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { Plus, Search } from "lucide-vue-next";
+import type { Component } from "vue";
+import { Bot, CircleAlert, FileText, FolderKanban, Hash, Plus, Radar, Search, Settings } from "lucide-vue-next";
 import type { DeskNavigationProjection, NavigationItemProjection, Surface } from "@/api/types";
 
 defineProps<{
@@ -49,6 +50,28 @@ function sidebarTitle(activeSurface: Surface): string {
   }
   return "Settings";
 }
+
+function navIcon(item: NavigationItemProjection): Component {
+  if (item.surface === "rooms") {
+    return Hash;
+  }
+  if (item.surface === "projects") {
+    return FolderKanban;
+  }
+  if (item.surface === "work") {
+    return CircleAlert;
+  }
+  if (item.surface === "artifact" || item.surface === "diff") {
+    return FileText;
+  }
+  if (item.surface === "agents") {
+    return Bot;
+  }
+  if (item.surface === "observe") {
+    return Radar;
+  }
+  return Settings;
+}
 </script>
 
 <template>
@@ -84,7 +107,7 @@ function sidebarTitle(activeSurface: Surface): string {
           type="button"
           @click="emit('navigate', item.surface, item.targetId)"
         >
-          <span>{{ item.icon }}</span>
+          <component :is="navIcon(item)" class="nav-icon" :size="16" aria-hidden="true" />
           <span class="nav-label">{{ item.label }}</span>
           <span v-if="item.badge" class="badge" :class="{ hot: item.attention === 'needs-human' }">{{ item.badge }}</span>
           <span v-else />

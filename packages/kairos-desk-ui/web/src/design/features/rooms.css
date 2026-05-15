@@ -1,6 +1,6 @@
 .context-strip {
   min-height: 50px;
-  background: oklch(98.8% 0.005 248);
+  background: var(--kd-panel);
   border-bottom: 1px solid var(--kd-border);
   display: flex;
   align-items: center;
@@ -59,10 +59,10 @@
 .room-work-decision {
   max-width: min(520px, 42vw);
   min-height: 34px;
-  border: 1px solid oklch(82% 0.09 78);
+  border: 1px solid var(--kd-attention-line);
   border-radius: 6px;
-  background: var(--kd-amber-soft);
-  color: oklch(39% 0.08 76);
+  background: var(--kd-attention-wash);
+  color: var(--kd-attention-text);
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: baseline;
@@ -73,8 +73,8 @@
 
 .room-work-decision:hover,
 .room-work-decision:focus-visible {
-  border-color: var(--kd-amber);
-  background: color-mix(in oklch, var(--kd-amber-soft) 68%, var(--kd-panel));
+  border-color: color-mix(in oklch, var(--kd-attention) 48%, var(--kd-border));
+  background: color-mix(in oklch, var(--kd-attention-soft) 60%, var(--kd-panel));
 }
 
 .room-work-decision span {
@@ -138,12 +138,12 @@
 }
 
 .message:hover {
-  background: oklch(94.5% 0.01 248);
+  background: var(--kd-panel-2);
 }
 
 .message.message-highlighted {
   background: var(--kd-blue-soft);
-  box-shadow: inset 0 0 0 1px oklch(72% 0.07 255 / 0.44);
+  box-shadow: inset 0 0 0 1px oklch(74% 0.085 var(--kd-blue-hue) / 0.42);
 }
 
 .avatar {
@@ -153,7 +153,7 @@
   display: grid;
   place-items: center;
   margin-left: 4px;
-  background: oklch(43% 0.035 255);
+  background: var(--kd-blue-950);
   color: var(--kd-panel);
   font-size: 12px;
   font-weight: var(--kd-weight-bold);
@@ -168,7 +168,7 @@
 }
 
 .avatar.service {
-  background: oklch(46% 0.04 235);
+  background: var(--kd-blue-800);
 }
 
 .msg-head {
@@ -208,7 +208,7 @@
   border: 1px solid var(--kd-border-strong);
   border-radius: 5px;
   background: var(--kd-panel);
-  box-shadow: 0 8px 18px oklch(18% 0.025 255 / 0.14);
+  box-shadow: 0 8px 18px oklch(18% 0.024 var(--kd-neutral-hue) / 0.14);
   transition: opacity 160ms ease-out;
 }
 

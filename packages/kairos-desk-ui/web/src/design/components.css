@@ -82,14 +82,15 @@
 }
 
 .pill.warn {
-  background: var(--kd-amber-soft);
-  border-color: var(--kd-amber);
-  color: oklch(36% 0.08 76);
+  background: color-mix(in oklch, var(--kd-attention-wash) 76%, var(--kd-panel));
+  border-color: var(--kd-attention-line);
+  color: var(--kd-attention-text);
+  font-weight: var(--kd-weight-semibold);
 }
 
 .pill.info {
   background: var(--kd-blue-soft);
-  border-color: oklch(84% 0.05 263);
+  border-color: var(--kd-blue-200);
   color: var(--kd-blue);
 }
 
@@ -151,7 +152,7 @@
   min-height: 0;
   padding: 16px 18px 22px;
   overflow: auto;
-  background: oklch(98.4% 0.005 248);
+  background: var(--kd-canvas);
 }
 
 .inspector-card,
@@ -163,7 +164,7 @@
   border: 1px solid var(--kd-border-strong);
   border-radius: 6px;
   background: var(--kd-panel);
-  box-shadow: 0 1px 0 oklch(18% 0.025 255 / 0.04);
+  box-shadow: 0 1px 0 oklch(18% 0.024 var(--kd-neutral-hue) / 0.04);
 }
 
 .inspector-card {
@@ -172,8 +173,8 @@
 }
 
 .inspector-card.attention {
-  background: var(--kd-amber-soft);
-  border-color: var(--kd-amber);
+  background: var(--kd-attention-wash);
+  border-color: var(--kd-attention-line);
 }
 
 .kicker {
@@ -286,9 +287,9 @@
 }
 
 .lane.current {
-  background: var(--kd-amber-soft);
-  color: oklch(36% 0.08 76);
-  border: 1px solid var(--kd-amber);
+  background: var(--kd-attention-wash);
+  color: var(--kd-attention-text);
+  border: 1px solid var(--kd-attention-line);
 }
 
 .trace-line {
@@ -316,7 +317,7 @@
 
 .trace-dot.warn,
 .trace-status-dot.warn {
-  background: var(--kd-amber);
+  background: var(--kd-attention);
 }
 
 .trace-dot.success,

@@ -1,9 +1,9 @@
 .diff-content-scroll {
-  --diff-paper: oklch(99.6% 0.002 248);
-  --diff-paper-muted: oklch(97.2% 0.004 248);
-  --diff-code-ink: oklch(27% 0.018 255);
-  --diff-hunk-bg: oklch(95.6% 0.018 230);
-  --diff-hunk-gutter: oklch(90.8% 0.032 230);
+  --diff-paper: oklch(99.5% 0.003 var(--kd-neutral-hue));
+  --diff-paper-muted: oklch(97.6% 0.009 var(--kd-neutral-hue));
+  --diff-code-ink: oklch(27% 0.02 var(--kd-neutral-hue));
+  --diff-hunk-bg: var(--kd-blue-50);
+  --diff-hunk-gutter: var(--kd-blue-100);
   --diff-add-bg: oklch(96.8% 0.034 148);
   --diff-add-gutter: oklch(90.2% 0.07 148);
   --diff-del-bg: oklch(96.7% 0.03 25);

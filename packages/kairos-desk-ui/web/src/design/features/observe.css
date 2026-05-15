@@ -77,7 +77,7 @@
   border: 1px solid var(--kd-border-strong);
   border-radius: 6px;
   background: var(--kd-panel);
-  box-shadow: 0 1px 0 oklch(18% 0.025 255 / 0.04);
+  box-shadow: 0 1px 0 oklch(18% 0.024 var(--kd-neutral-hue) / 0.04);
 }
 
 .observe-panel-head {
@@ -250,17 +250,17 @@
 }
 
 .trace-insight.warn {
-  border-color: oklch(82% 0.09 78);
-  background: var(--kd-amber-soft);
+  border-color: var(--kd-attention-line);
+  background: var(--kd-attention-wash);
 }
 
 .trace-insight.bad {
-  border-color: oklch(74% 0.09 28);
+  border-color: var(--kd-red);
   background: var(--kd-red-soft);
 }
 
 .trace-insight.success {
-  border-color: oklch(78% 0.07 151);
+  border-color: var(--kd-green);
   background: var(--kd-green-soft);
 }
 
@@ -379,7 +379,7 @@
 }
 
 .evidence-audit-copy .audit-row-meta.warn {
-  color: oklch(44% 0.08 76);
+  color: var(--kd-attention-text);
 }
 
 .evidence-audit-copy .audit-row-meta.bad {
@@ -439,7 +439,7 @@
 }
 
 .endpoint-audit-meta.warn {
-  color: oklch(44% 0.08 76);
+  color: var(--kd-attention-text);
 }
 
 .endpoint-audit-meta.bad {
