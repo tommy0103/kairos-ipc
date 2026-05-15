@@ -710,6 +710,12 @@ export const deskFixture: DeskSnapshot = {
           targetAnchorId: "file-src-fibonacci",
         },
         {
+          label: "Alice patch report",
+          targetSurface: "rooms",
+          targetId: "room-fibonacci-cli",
+          targetAnchorId: "msg-104",
+        },
+        {
           label: "Requirement note",
           targetSurface: "artifact",
           targetId: "artifact-requirement-note",

@@ -56,6 +56,13 @@ function fileDeltaLabel(file: FileDiffProjection): string {
   return `+${file.addedLines} -${file.removedLines}`;
 }
 
+function fileStatusLabel(status: FileDiffProjection["status"]): string {
+  if (status === "modified") return "M";
+  if (status === "deleted") return "D";
+  if (status === "added") return "A";
+  return "R";
+}
+
 function changeBarClass(file: FileDiffProjection, index: number): string {
   const activeBars = Math.min(5, Math.max(1, Math.ceil(file.addedLines / Math.max(1, props.patchSet.addedLines / 5))));
   return index <= activeBars ? "added" : "quiet";
@@ -196,7 +203,7 @@ function collapsedLineLabel(line: DiffLineProjection, hunkHeader: string): strin
                 <ChevronDown class="diff-collapse-mark" :size="16" aria-hidden="true" />
                 <FileCode2 :size="15" aria-hidden="true" />
                 <h2>{{ file.path }}</h2>
-                <span class="changed-file-status">{{ file.status }}</span>
+                <span class="diff-file-status" :aria-label="file.status">{{ fileStatusLabel(file.status) }}</span>
               </div>
               <div class="diff-file-actions">
                 <span class="changed-file-stat added">+{{ file.addedLines }}</span>

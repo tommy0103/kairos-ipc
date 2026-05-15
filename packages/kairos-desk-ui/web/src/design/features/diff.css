@@ -1,5 +1,14 @@
 .diff-content-scroll {
-  background: var(--kd-panel);
+  --diff-paper: oklch(99.6% 0.002 248);
+  --diff-paper-muted: oklch(97.2% 0.004 248);
+  --diff-code-ink: oklch(27% 0.018 255);
+  --diff-hunk-bg: oklch(95.6% 0.018 230);
+  --diff-hunk-gutter: oklch(90.8% 0.032 230);
+  --diff-add-bg: oklch(96.8% 0.034 148);
+  --diff-add-gutter: oklch(90.2% 0.07 148);
+  --diff-del-bg: oklch(96.7% 0.03 25);
+  --diff-del-gutter: oklch(91.5% 0.062 25);
+  background: var(--diff-paper);
 }
 
 .diff-reader-page {
@@ -155,7 +164,7 @@
 .diff-file-list {
   border: 0;
   border-radius: 0;
-  background: var(--kd-panel);
+  background: var(--diff-paper);
   overflow: visible;
   position: sticky;
   top: 16px;
@@ -216,9 +225,9 @@
 }
 
 .diff-file-block {
-  border: 1px solid color-mix(in oklch, var(--kd-border) 78%, var(--kd-panel));
+  border: 1px solid color-mix(in oklch, var(--kd-border) 72%, var(--diff-paper));
   border-radius: 6px;
-  background: var(--kd-panel);
+  background: var(--diff-paper);
   overflow: hidden;
 }
 
@@ -233,8 +242,8 @@
   justify-content: space-between;
   gap: 14px;
   padding: 10px 14px;
-  border-bottom: 1px solid var(--kd-border);
-  background: color-mix(in oklch, var(--kd-panel-2) 22%, var(--kd-panel));
+  border-bottom: 1px solid color-mix(in oklch, var(--kd-border) 74%, var(--diff-paper));
+  background: var(--diff-paper-muted);
   flex-wrap: wrap;
 }
 
@@ -265,6 +274,19 @@
   color: var(--kd-muted);
   font-size: 12px;
   line-height: 16px;
+}
+
+.diff-file-status {
+  width: 18px;
+  height: 18px;
+  border: 1px solid color-mix(in oklch, var(--kd-border) 78%, var(--diff-paper));
+  border-radius: 4px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--kd-muted);
+  font-size: 10px;
+  line-height: 1;
+  font-weight: var(--kd-weight-semibold);
 }
 
 .diff-file-actions {
@@ -301,7 +323,7 @@
 }
 
 .diff-hunk + .diff-hunk {
-  border-top: 1px solid var(--kd-border);
+  border-top: 1px solid color-mix(in oklch, var(--kd-border) 74%, var(--diff-paper));
 }
 
 .diff-hunk-header {
@@ -309,8 +331,8 @@
   display: flex;
   align-items: center;
   padding: 0 10px;
-  background: oklch(94.5% 0.023 228);
-  border-bottom: 1px solid var(--kd-border);
+  background: var(--diff-hunk-bg);
+  border-bottom: 1px solid color-mix(in oklch, var(--kd-border) 70%, var(--diff-hunk-bg));
   color: var(--kd-muted);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 12px;
@@ -319,14 +341,15 @@
 
 .diff-lines {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  line-height: 18px;
+  font-size: 12.5px;
+  line-height: 20px;
+  background: var(--diff-paper);
 }
 
 .diff-line {
   display: grid;
   grid-template-columns: 48px 48px 20px minmax(0, 1fr);
-  min-height: 20px;
+  min-height: 21px;
 }
 
 .diff-line-number,
@@ -335,7 +358,8 @@
   user-select: none;
   text-align: right;
   padding: 1px 8px 1px 0;
-  border-right: 1px solid var(--kd-border);
+  background: var(--diff-paper);
+  border-right: 1px solid color-mix(in oklch, var(--kd-border) 70%, var(--diff-paper));
 }
 
 .diff-line-prefix {
@@ -347,14 +371,19 @@
   display: block;
   min-width: 0;
   padding: 1px 10px;
-  color: var(--kd-text);
+  color: var(--diff-code-ink);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   background: transparent;
 }
 
 .diff-line.addition {
-  background: oklch(95.5% 0.035 150);
+  background: var(--diff-add-bg);
+}
+
+.diff-line.addition .diff-line-number,
+.diff-line.addition .diff-line-prefix {
+  background: var(--diff-add-gutter);
 }
 
 .diff-line.addition .diff-line-prefix,
@@ -363,7 +392,12 @@
 }
 
 .diff-line.deletion {
-  background: oklch(95.5% 0.032 25);
+  background: var(--diff-del-bg);
+}
+
+.diff-line.deletion .diff-line-number,
+.diff-line.deletion .diff-line-prefix {
+  background: var(--diff-del-gutter);
 }
 
 .diff-line.deletion .diff-line-prefix,
@@ -372,14 +406,14 @@
 }
 
 .diff-line.context {
-  background: var(--kd-panel);
+  background: var(--diff-paper);
 }
 
 .diff-line.collapsed {
   display: block;
   min-height: 24px;
   padding: 0;
-  background: oklch(94.6% 0.03 225);
+  background: var(--diff-hunk-bg);
   color: var(--kd-muted);
   font-family: inherit;
   font-size: 12px;
@@ -402,14 +436,14 @@
 }
 
 .diff-line-expand:hover {
-  background: oklch(92.7% 0.036 225);
+  background: color-mix(in oklch, var(--diff-hunk-bg) 72%, var(--diff-hunk-gutter));
 }
 
 .diff-fold-gutter {
   min-height: 24px;
   display: inline-grid;
   place-items: center;
-  background: oklch(86.8% 0.05 225);
+  background: var(--diff-hunk-gutter);
   color: color-mix(in oklch, var(--kd-muted) 80%, var(--kd-ink));
   border-right: 1px solid color-mix(in oklch, var(--kd-border) 72%, var(--kd-blue-soft));
 }
@@ -429,7 +463,7 @@
 }
 
 .expanded-context .diff-line-content {
-  color: var(--kd-muted);
+  color: color-mix(in oklch, var(--kd-muted) 82%, var(--diff-code-ink));
 }
 
 .changed-files-panel {

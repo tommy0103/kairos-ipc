@@ -18,7 +18,6 @@ const attentionCards = computed(() =>
   project.value.cards.filter((item) => item.status === "needs-human" || item.status === "blocked" || item.status === "failed"),
 );
 const projectArtifacts = computed(() => props.artifacts.filter((artifact) => artifact.projectId === project.value.id));
-const linkedRoomLabel = computed(() => `${project.value.roomIds.length} room${project.value.roomIds.length === 1 ? "" : "s"}`);
 const primaryAttentionCard = computed(() => attentionCards.value[0] ?? null);
 </script>
 
@@ -30,18 +29,6 @@ const primaryAttentionCard = computed(() => attentionCards.value[0] ?? null);
           <span class="project-kicker">Project</span>
           <h1>{{ project.title }}</h1>
           <p>{{ project.summary }}</p>
-        </div>
-        <div class="project-header-side">
-          <div class="project-facts" aria-label="Project facts">
-            <span><strong>{{ project.phase }}</strong> phase</span>
-            <span><strong>{{ project.owner }}</strong> owner</span>
-            <span><strong>{{ project.agentIds.length }}</strong> agents</span>
-            <span><strong>{{ linkedRoomLabel }}</strong></span>
-          </div>
-          <div class="project-header-actions">
-            <button class="secondary-button compact-action" type="button" @click="emit('navigate', 'rooms', project.roomIds[0])">Open room</button>
-            <button class="ghost-link" type="button">New project</button>
-          </div>
         </div>
       </header>
 

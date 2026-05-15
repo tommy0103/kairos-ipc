@@ -27,21 +27,15 @@
     max-width: none;
   }
 
-  .project-canvas-header {
-    grid-template-columns: 1fr;
-  }
-
-  .project-facts {
-    justify-content: flex-start;
-    text-align: left;
-  }
-
-  .project-header-side {
-    justify-items: start;
-  }
-
   .work-detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .changed-files-panel,
+  .evidence-panel {
+    grid-column: 1;
+    grid-row: auto;
+    max-width: none;
   }
 
   .observe-summary-strip {
@@ -131,16 +125,11 @@
     justify-content: flex-start;
   }
 
-  .project-canvas-header {
-    gap: 14px;
-  }
-
   .project-title-block h1 {
     font-size: 20px;
     line-height: 27px;
   }
 
-  .project-header-actions,
   .attention-strip-actions {
     justify-content: flex-start;
   }
@@ -151,6 +140,21 @@
 
   .attention-strip-actions {
     grid-column: 2;
+  }
+
+  .work-review-action {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .work-review-actions,
+  .work-review-button {
+    width: 100%;
+  }
+
+  .work-review-actions {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .observe-summary-strip,

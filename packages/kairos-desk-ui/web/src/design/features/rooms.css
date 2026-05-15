@@ -368,6 +368,46 @@
   flex-direction: column;
 }
 
+.composer-reply-context {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 7px 8px 7px 11px;
+  border-bottom: 1px solid var(--kd-border);
+  background: color-mix(in oklch, var(--kd-blue-soft) 54%, var(--kd-panel));
+  color: var(--kd-muted);
+}
+
+.composer-reply-context > svg {
+  color: var(--kd-blue);
+}
+
+.composer-reply-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.composer-reply-copy span {
+  color: var(--kd-muted);
+  font-size: 11px;
+  line-height: 15px;
+  font-weight: var(--kd-weight-medium);
+}
+
+.composer-reply-copy strong {
+  min-width: 0;
+  color: var(--kd-ink);
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: var(--kd-weight-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .composer-input {
   flex: 1;
   min-height: 45px;

@@ -1,13 +1,14 @@
 <script setup lang="ts">
+import { ArrowRight, FileCode2, MessageSquareText } from "lucide-vue-next";
 import { computed } from "vue";
-import type { ArtifactDetailProjection, ObserveProjection, PatchSetProjection, ProjectProjection, Surface, WorkCardProjection } from "@/api/types";
-import { formatPatchSetSummary } from "@/diff/diffFormatting";
+import type { ArtifactDetailProjection, ObserveProjection, PatchSetProjection, ProjectProjection, RoomProjection, Surface, WorkCardProjection } from "@/api/types";
 
 const props = defineProps<{
   project: ProjectProjection;
   card: WorkCardProjection;
   artifacts: ArtifactDetailProjection[];
   patchSets: PatchSetProjection[];
+  rooms: RoomProjection[];
   observe: ObserveProjection;
 }>();
 
@@ -21,14 +22,78 @@ const cardPatchSets = computed(() => {
   return props.card.patchSetIds.map((patchSetId) => patchSetsById.get(patchSetId)).filter((patchSet): patchSet is PatchSetProjection => Boolean(patchSet));
 });
 const changedFiles = computed(() => cardPatchSets.value.flatMap((patchSet) => patchSet.files.map((file) => ({ patchSet, file }))));
-const projectTrace = computed(() => props.observe.traceGroups.find((trace) => trace.linkedProjectId === props.project.id) ?? props.observe.traceGroups[0]);
 const cardEvidence = computed(() =>
   props.observe.evidence.filter((item) => item.linkedId === props.card.id || cardArtifacts.value.some((artifact) => artifact.id === item.linkedId)),
 );
-const actionLabel = computed(() => (props.card.status === "needs-human" ? "Decision needed before build" : props.card.status));
+const needsHumanReview = computed(() => props.card.status === "needs-human");
+const reviewArtifact = computed(() => cardArtifacts.value.find((artifact) => artifact.status === "ready") ?? cardArtifacts.value[0] ?? null);
+const primaryPatchSet = computed(() => cardPatchSets.value[0] ?? null);
+const reviewCopy = computed(() => {
+  if (primaryPatchSet.value) {
+    return "The patch is written. Check the diff, then return to the room if you want another pass.";
+  }
+  if (reviewArtifact.value) {
+    return "The artifact is ready to inspect. Use the room if you want clarification or follow-up work.";
+  }
+  return "This work needs human attention. Open its room context to continue the thread.";
+});
+const discussionTarget = computed(() => {
+  const artifactIds = new Set(cardArtifacts.value.map((artifact) => artifact.id));
+
+  for (const room of props.rooms) {
+    for (const message of room.messages) {
+      const hasSourceProjection = message.projections.some((projection) => {
+        if (projection.kind === "work-card") return projection.id === props.card.id;
+        if (projection.kind === "decision") return projection.cardId === props.card.id;
+        if (projection.kind === "artifact") return artifactIds.has(projection.id);
+        return false;
+      });
+
+      if (hasSourceProjection) {
+        return { roomId: room.id, messageId: message.id };
+      }
+    }
+  }
+
+  const sourceArtifact = cardArtifacts.value[0];
+  if (sourceArtifact) {
+    return { roomId: sourceArtifact.sourceRoomId, messageId: null };
+  }
+
+  return { roomId: props.project.roomIds[0] ?? props.rooms[0]?.id ?? "", messageId: null };
+});
+
+function fileStatusLabel(status: (typeof changedFiles.value)[number]["file"]["status"]): string {
+  if (status === "modified") return "M";
+  if (status === "deleted") return "D";
+  if (status === "added") return "A";
+  return "R";
+}
 
 function openDiff(patchSetId: string, fileId?: string): void {
   emit("navigate", "diff", patchSetId, fileId ?? null);
+}
+
+function reviewChanges(): void {
+  if (primaryPatchSet.value) {
+    emit("navigate", "diff", primaryPatchSet.value.id);
+    return;
+  }
+
+  if (reviewArtifact.value) {
+    emit("navigate", "artifact", reviewArtifact.value.id);
+    return;
+  }
+
+  emit("navigate", "projects", props.project.id);
+}
+
+function discussInRoom(): void {
+  if (!discussionTarget.value.roomId) {
+    return;
+  }
+
+  emit("navigate", "rooms", discussionTarget.value.roomId, discussionTarget.value.messageId);
 }
 </script>
 
@@ -49,10 +114,21 @@ function openDiff(patchSetId: string, fileId?: string): void {
           <div class="work-detail-copy">
             <p>{{ card.summary }}</p>
           </div>
-          <div class="work-detail-statusline" aria-label="Work state">
-            <span class="pill warn">{{ actionLabel }}</span>
-            <span class="pill">Owner: {{ card.owner }}</span>
-            <span class="pill">Trace: {{ projectTrace?.id ?? "none" }}</span>
+          <div v-if="needsHumanReview" class="work-review-action" aria-label="Work ready for review">
+            <div class="work-review-copy">
+              <div class="work-review-title">Ready for review</div>
+              <p>{{ reviewCopy }}</p>
+            </div>
+            <div class="work-review-actions">
+              <button class="primary-button work-review-button" type="button" @click="reviewChanges">
+                <span>Review changes</span>
+                <ArrowRight :size="14" aria-hidden="true" />
+              </button>
+              <button class="secondary-button work-review-button" type="button" @click="discussInRoom">
+                <MessageSquareText :size="14" aria-hidden="true" />
+                <span>Discuss in room</span>
+              </button>
+            </div>
           </div>
         </section>
 
@@ -76,13 +152,19 @@ function openDiff(patchSetId: string, fileId?: string): void {
         <section class="work-detail-panel changed-files-panel">
           <div class="panel-kicker-row">
             <span class="kicker">Changed files</span>
-            <button v-if="cardPatchSets[0]" class="ghost-link" type="button" @click="openDiff(cardPatchSets[0].id)">{{ formatPatchSetSummary(cardPatchSets[0]) }}</button>
+            <div v-if="cardPatchSets[0]" class="diff-entry-summary">
+              <button class="ghost-link diff-entry-action" type="button" @click="openDiff(cardPatchSets[0].id)">Open diff</button>
+              <span>{{ cardPatchSets[0].filesChanged }} files</span>
+              <span class="changed-file-stat added">+{{ cardPatchSets[0].addedLines }}</span>
+              <span class="changed-file-stat removed">-{{ cardPatchSets[0].removedLines }}</span>
+            </div>
             <span v-else>0</span>
           </div>
           <div v-if="changedFiles.length" class="changed-file-list">
             <button v-for="entry in changedFiles" :key="`${entry.patchSet.id}:${entry.file.id}`" class="changed-file-row" type="button" @click="openDiff(entry.patchSet.id, entry.file.id)">
+              <FileCode2 :size="14" aria-hidden="true" />
               <span class="changed-file-path">{{ entry.file.path }}</span>
-              <span class="changed-file-status">{{ entry.file.status }}</span>
+              <span class="changed-file-status" :class="`is-${entry.file.status}`">{{ fileStatusLabel(entry.file.status) }}</span>
               <span class="changed-file-stat added">+{{ entry.file.addedLines }}</span>
               <span class="changed-file-stat removed">-{{ entry.file.removedLines }}</span>
             </button>

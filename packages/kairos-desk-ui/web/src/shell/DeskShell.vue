@@ -442,6 +442,7 @@ function cardForTarget(snapshot: DeskSnapshot, targetId: string) {
         :card="activeWorkCard"
         :artifacts="snapshot.artifacts"
         :patch-sets="snapshot.patchSets"
+        :rooms="snapshot.rooms"
         :observe="snapshot.observe"
         @navigate="navigate"
       />

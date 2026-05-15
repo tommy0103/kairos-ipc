@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
-import { MoreHorizontal } from "lucide-vue-next";
-import type { ArtifactDetailProjection } from "@/api/types";
+import { MessageSquareText, MoreHorizontal } from "lucide-vue-next";
+import type { ArtifactDetailProjection, Surface } from "@/api/types";
 import { markdownToBlocks, type ArtifactMarkdownBlock } from "./ArtifactMarkdown";
 
 const props = defineProps<{
@@ -9,11 +9,12 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  navigate: [surface: ArtifactDetailProjection["sourceRefs"][number]["targetSurface"], targetId: string, focusId?: string | null];
+  navigate: [surface: Surface, targetId: string, focusId?: string | null];
 }>();
 
 const blocks = computed(() => markdownToBlocks(props.artifact.markdown));
 const toc = computed(() => blocks.value.filter(isHeading));
+const roomSourceRef = computed(() => props.artifact.sourceRefs.find((ref) => ref.targetSurface === "rooms") ?? null);
 const articleRef = ref<HTMLElement | null>(null);
 const activeHeadingId = ref<string | null>(null);
 let scrollRoot: Element | null = null;
@@ -48,6 +49,15 @@ function selectHeading(heading: HeadingBlock): void {
 
 function selectSourceRef(ref: SourceRef): void {
   emit("navigate", ref.targetSurface, ref.targetId, ref.targetAnchorId ?? null);
+}
+
+function discussInRoom(): void {
+  if (roomSourceRef.value) {
+    selectSourceRef(roomSourceRef.value);
+    return;
+  }
+
+  emit("navigate", "rooms", props.artifact.sourceRoomId, null);
 }
 
 function sourceRefKind(ref: SourceRef): string {
@@ -117,14 +127,15 @@ onBeforeUnmount(() => scrollRoot?.removeEventListener("scroll", updateActiveHead
           </div>
           <div class="artifact-actions" aria-label="Artifact actions">
             <span class="pill">{{ artifact.status }}</span>
-            <button class="primary-button" type="button">Accept</button>
+            <button class="secondary-button" type="button" @click="discussInRoom">
+              <MessageSquareText :size="14" aria-hidden="true" />
+              Discuss in room
+            </button>
             <details class="artifact-more-menu">
               <summary class="icon-button" aria-label="More artifact actions" title="More artifact actions">
                 <MoreHorizontal :size="16" aria-hidden="true" />
               </summary>
               <div class="artifact-more-panel" role="menu">
-                <button type="button" role="menuitem">Request revision</button>
-                <button type="button" role="menuitem">Supersede artifact</button>
                 <button type="button" role="menuitem">Copy artifact link</button>
               </div>
             </details>
