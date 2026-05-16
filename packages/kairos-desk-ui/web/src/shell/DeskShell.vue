@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { ChevronDown, Search, X } from "lucide-vue-next";
-import type { DeskSnapshot, InspectorProjection, Surface } from "@/api/types";
+import type { DeskSnapshot, Surface } from "@/api/types";
 import AgentsPage from "@/agents/AgentsPage.vue";
 import ArtifactReader from "@/artifacts/ArtifactReader.vue";
 import DiffReader from "@/diff/DiffReader.vue";
@@ -11,7 +11,7 @@ import WorkDetailPage from "@/projects/WorkDetailPage.vue";
 import RoomPage from "@/rooms/RoomPage.vue";
 import DeskHeader from "./DeskHeader.vue";
 import DeskSidebar from "./DeskSidebar.vue";
-import RightInspector from "./RightInspector.vue";
+import ProjectContextSidebar from "./ProjectContextSidebar.vue";
 import WorkspaceRail from "./WorkspaceRail.vue";
 
 const props = defineProps<{
@@ -21,8 +21,6 @@ const props = defineProps<{
 interface RouteState {
   surface: Surface;
   targetId: string;
-  panelMode: InspectorProjection["mode"];
-  panelId: string;
   focusId: string | null;
   returnArtifactId: string | null;
 }
@@ -30,8 +28,6 @@ interface RouteState {
 const routeState = readRouteState(props.snapshot);
 const activeSurface = ref<Surface>(routeState.surface);
 const activeTargetId = ref(routeState.targetId);
-const panelMode = ref<InspectorProjection["mode"]>(routeState.panelMode);
-const panelId = ref(routeState.panelId);
 const activeFocusId = ref<string | null>(routeState.focusId);
 const returnArtifactId = ref<string | null>(routeState.returnArtifactId);
 
@@ -41,9 +37,7 @@ const activePatchSet = computed(() => props.snapshot.patchSets.find((patchSet) =
 const activeWorkCard = computed(() => cardForTarget(props.snapshot, activeTargetId.value) ?? (activePatchSet.value ? cardForTarget(props.snapshot, activePatchSet.value.workCardId) : null) ?? activeProject.value.cards[0] ?? null);
 const activeArtifact = computed(() => props.snapshot.artifacts.find((artifact) => artifact.id === activeTargetId.value) ?? props.snapshot.artifacts[0]!);
 const activeProjectArtifactTargetId = computed(() => activeProject.value.artifactIds.at(-1) ?? props.snapshot.artifacts[0]?.id ?? "");
-const inspectorOpen = ref(false);
-const inspectorAvailable = computed(() => activeSurface.value !== "work" && activeSurface.value !== "artifact" && activeSurface.value !== "diff");
-const inspectorVisible = computed(() => inspectorAvailable.value && inspectorOpen.value);
+const projectContextCollapsed = ref(false);
 const returnArtifact = computed(() => {
   if (activeSurface.value === "artifact" || !returnArtifactId.value) {
     return null;
@@ -53,13 +47,11 @@ const returnArtifact = computed(() => {
 });
 
 watch(
-  [activeSurface, activeTargetId, panelMode, panelId, activeFocusId, returnArtifactId],
+  [activeSurface, activeTargetId, activeFocusId, returnArtifactId],
   () => {
     persistRouteState({
       surface: activeSurface.value,
       targetId: activeTargetId.value,
-      panelMode: panelMode.value,
-      panelId: panelId.value,
       focusId: activeFocusId.value,
       returnArtifactId: returnArtifactId.value,
     });
@@ -83,9 +75,6 @@ function applyNavigation(surface: Surface, targetId?: string, focusId?: string |
   activeSurface.value = surface;
   activeTargetId.value = normalizedTargetId;
   activeFocusId.value = focusId ?? null;
-  const nextPanel = panelForTarget(surface, normalizedTargetId, props.snapshot);
-  panelMode.value = nextPanel.panelMode;
-  panelId.value = nextPanel.panelId;
 }
 
 function returnToArtifact(): void {
@@ -100,16 +89,8 @@ function dismissReturnArtifact(): void {
   returnArtifactId.value = null;
 }
 
-function toggleInspector(): void {
-  if (!inspectorAvailable.value) {
-    return;
-  }
-
-  inspectorOpen.value = !inspectorOpen.value;
-}
-
-function closeInspector(): void {
-  inspectorOpen.value = false;
+function toggleProjectContext(): void {
+  projectContextCollapsed.value = !projectContextCollapsed.value;
 }
 
 function defaultTargetId(surface: Surface): string {
@@ -143,17 +124,11 @@ function readRouteState(snapshot: DeskSnapshot): RouteState {
   const params = typeof window === "undefined" ? new URLSearchParams() : new URLSearchParams(window.location.search);
   const surface = coerceSurface(params.get("surface") ?? stored?.surface, fallbackSurface);
   const targetId = normalizeTargetId(surface, params.get("target") ?? stored?.targetId ?? firstTargetId(surface, snapshot), snapshot);
-  const panel = panelForTarget(surface, targetId, snapshot);
-  const requestedPanelMode = coercePanelMode(params.get("panel") ?? stored?.panelMode, panel.panelMode);
-  const requestedPanelId = params.get("panelId") ?? stored?.panelId ?? panel.panelId;
   const focusId = params.get("focus") ?? stored?.focusId ?? null;
   const returnArtifactId = normalizeReturnArtifactId(params.get("returnArtifact") ?? stored?.returnArtifactId ?? null, surface, snapshot);
-  const normalizedPanel = normalizePanelState(surface, targetId, requestedPanelMode, requestedPanelId, snapshot);
   return {
     surface,
     targetId,
-    panelMode: normalizedPanel.panelMode,
-    panelId: normalizedPanel.panelId,
     focusId,
     returnArtifactId,
   };
@@ -197,8 +172,8 @@ function persistRouteState(state: RouteState): void {
     const params = new URLSearchParams(window.location.search);
     params.set("surface", state.surface);
     params.set("target", state.targetId);
-    params.set("panel", state.panelMode);
-    params.set("panelId", state.panelId);
+    params.delete("panel");
+    params.delete("panelId");
     if (state.focusId) {
       params.set("focus", state.focusId);
     } else {
@@ -231,13 +206,6 @@ function coerceSurface(value: string | undefined | null, fallback: Surface): Sur
   return fallback;
 }
 
-function coercePanelMode(value: string | undefined | null, fallback: InspectorProjection["mode"]): InspectorProjection["mode"] {
-  if (value === "decision" || value === "artifact" || value === "work-card" || value === "trace" || value === "room-info") {
-    return value;
-  }
-  return fallback;
-}
-
 function firstTargetId(surface: Surface, snapshot: DeskSnapshot): string {
   if (surface === "rooms") {
     return snapshot.rooms[0]?.id ?? "";
@@ -263,34 +231,6 @@ function firstTargetId(surface: Surface, snapshot: DeskSnapshot): string {
   return "settings";
 }
 
-function panelForTarget(surface: Surface, targetId: string, snapshot: DeskSnapshot): Pick<RouteState, "panelMode" | "panelId"> {
-  if (surface === "artifact") {
-    return { panelMode: "artifact", panelId: targetId || snapshot.artifacts[0]?.id || "" };
-  }
-  if (surface === "diff") {
-    const patchSet = snapshot.patchSets.find((patch) => patch.id === targetId) ?? snapshot.patchSets[0];
-    return { panelMode: "work-card", panelId: patchSet?.workCardId ?? snapshot.projects[0]?.cards[0]?.id ?? "" };
-  }
-  if (surface === "observe") {
-    return { panelMode: "trace", panelId: targetId || snapshot.observe.traceGroups[0]?.id || "" };
-  }
-  if (surface === "work") {
-    return { panelMode: "work-card", panelId: targetId || snapshot.projects[0]?.cards[0]?.id || "" };
-  }
-  if (targetId.startsWith("card-")) {
-    return { panelMode: "work-card", panelId: targetId };
-  }
-  if (surface === "projects") {
-    const project = projectForTarget(snapshot, targetId) ?? snapshot.projects[0];
-    const card = project?.cards.find((candidate) => candidate.status === "needs-human") ?? project?.cards[0];
-    return { panelMode: card?.id === "card-shape-decision" ? "decision" : "work-card", panelId: card?.id ?? targetId };
-  }
-  if (surface === "rooms") {
-    return { panelMode: snapshot.inspector.mode, panelId: snapshot.inspector.decisionId ?? snapshot.inspector.cardId ?? targetId };
-  }
-  return { panelMode: "room-info", panelId: targetId };
-}
-
 function normalizeTargetId(surface: Surface, targetId: string, snapshot: DeskSnapshot): string {
   if (surface === "rooms" && snapshot.rooms.some((room) => room.id === targetId)) {
     return targetId;
@@ -314,55 +254,6 @@ function normalizeTargetId(surface: Surface, targetId: string, snapshot: DeskSna
     return targetId;
   }
   return firstTargetId(surface, snapshot);
-}
-
-function normalizePanelState(
-  surface: Surface,
-  targetId: string,
-  mode: InspectorProjection["mode"],
-  panelId: string,
-  snapshot: DeskSnapshot,
-): Pick<RouteState, "panelMode" | "panelId"> {
-  if (isCompatiblePanel(surface, mode) && isValidPanelId(mode, panelId, snapshot, targetId)) {
-    return { panelMode: mode, panelId };
-  }
-
-  return panelForTarget(surface, targetId, snapshot);
-}
-
-function isCompatiblePanel(surface: Surface, mode: InspectorProjection["mode"]): boolean {
-  if (surface === "artifact") {
-    return mode === "artifact";
-  }
-  if (surface === "diff") {
-    return mode === "work-card";
-  }
-  if (surface === "work") {
-    return mode === "work-card";
-  }
-  if (surface === "observe") {
-    return mode === "trace";
-  }
-  if (surface === "agents" || surface === "settings") {
-    return mode === "room-info";
-  }
-  return mode === "decision" || mode === "work-card" || mode === "artifact" || mode === "trace" || mode === "room-info";
-}
-
-function isValidPanelId(mode: InspectorProjection["mode"], panelId: string, snapshot: DeskSnapshot, targetId: string): boolean {
-  if (mode === "artifact") {
-    return snapshot.artifacts.some((artifact) => artifact.id === panelId);
-  }
-  if (mode === "trace") {
-    return snapshot.observe.traceGroups.some((trace) => trace.id === panelId);
-  }
-  if (mode === "work-card") {
-    return snapshot.projects.some((project) => project.cards.some((card) => card.id === panelId));
-  }
-  if (mode === "decision") {
-    return snapshot.rooms.some((room) => room.messages.some((message) => message.projections.some((projection) => projection.kind === "decision" && (projection.id === panelId || projection.cardId === panelId))));
-  }
-  return Boolean(targetId);
 }
 
 function projectForTarget(snapshot: DeskSnapshot, targetId: string) {
@@ -401,7 +292,15 @@ function cardForTarget(snapshot: DeskSnapshot, targetId: string) {
 </script>
 
 <template>
-  <div class="desk-shell" :class="{ 'inspector-open': inspectorVisible, 'artifact-reader-mode': activeSurface === 'artifact', 'diff-reader-mode': activeSurface === 'diff' }">
+  <div
+    class="desk-shell"
+    :class="{
+      'artifact-reader-mode': activeSurface === 'artifact',
+      'diff-reader-mode': activeSurface === 'diff',
+      'project-context-mode': activeSurface === 'projects',
+      'project-context-collapsed': activeSurface === 'projects' && projectContextCollapsed,
+    }"
+  >
     <header class="topbar">
       <button class="brand-mark" type="button" aria-label="Kairos Desk">K</button>
       <div class="workspace-menu">
@@ -428,10 +327,7 @@ function cardForTarget(snapshot: DeskSnapshot, targetId: string) {
         :project="activeProject"
         :work-card="activeWorkCard"
         :artifact-target-id="activeProjectArtifactTargetId"
-        :inspector-open="inspectorVisible"
-        :inspector-available="inspectorAvailable"
         @navigate="navigate"
-        @toggle-inspector="toggleInspector"
       />
 
       <RoomPage v-if="activeSurface === 'rooms'" :room="activeRoom" :project="activeProject" :highlighted-message-id="activeFocusId" @navigate="navigate" />
@@ -457,16 +353,7 @@ function cardForTarget(snapshot: DeskSnapshot, targetId: string) {
       </div>
     </main>
 
-    <RightInspector
-      v-if="inspectorVisible"
-      :snapshot="snapshot"
-      :active-surface="activeSurface"
-      :active-target-id="activeTargetId"
-      :panel-mode="panelMode"
-      :panel-id="panelId"
-      @navigate="navigate"
-      @close="closeInspector"
-    />
+    <ProjectContextSidebar v-if="activeSurface === 'projects'" :project="activeProject" :collapsed="projectContextCollapsed" @toggle="toggleProjectContext" />
 
     <aside v-if="returnArtifact" class="artifact-return-card" aria-label="Return to artifact reader">
       <div>

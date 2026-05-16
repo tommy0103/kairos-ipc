@@ -268,16 +268,6 @@ export interface EvidenceProjection {
   attention: AttentionLevel;
 }
 
-export interface InspectorProjection {
-  mode: "decision" | "artifact" | "work-card" | "trace" | "room-info";
-  title: string;
-  subtitle: string;
-  decisionId: string | null;
-  artifactId: string | null;
-  cardId: string | null;
-  traceId: string | null;
-}
-
 export interface DeskSnapshot {
   workspace: WorkspaceProjection;
   nav: DeskNavigationProjection;
@@ -287,5 +277,4 @@ export interface DeskSnapshot {
   artifacts: ArtifactDetailProjection[];
   agents: AgentProjection[];
   observe: ObserveProjection;
-  inspector: InspectorProjection;
 }

@@ -149,26 +149,34 @@
 .avatar {
   width: 32px;
   height: 32px;
-  border-radius: 6px;
+  border: 1px solid color-mix(in oklch, var(--kd-green) 18%, transparent);
+  border-radius: 999px;
   display: grid;
   place-items: center;
   margin-left: 4px;
-  background: var(--kd-blue-950);
-  color: var(--kd-panel);
+  background: color-mix(in oklch, var(--kd-green-soft) 78%, transparent);
+  color: oklch(39% 0.1 151);
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--kd-panel) 72%, transparent);
   font-size: 12px;
-  font-weight: var(--kd-weight-bold);
+  font-weight: var(--kd-weight-semibold);
 }
 
 .avatar.agent {
-  background: var(--kd-blue);
+  border-color: color-mix(in oklch, var(--kd-blue) 18%, transparent);
+  background: color-mix(in oklch, var(--kd-blue-soft) 84%, transparent);
+  color: var(--kd-blue);
 }
 
 .avatar.review {
-  background: var(--kd-purple);
+  border-color: color-mix(in oklch, var(--kd-purple) 18%, transparent);
+  background: color-mix(in oklch, var(--kd-purple) 10%, var(--kd-panel));
+  color: oklch(43% 0.11 298);
 }
 
 .avatar.service {
-  background: var(--kd-blue-800);
+  border-color: color-mix(in oklch, var(--kd-blue-800) 16%, transparent);
+  background: color-mix(in oklch, var(--kd-blue-soft) 62%, var(--kd-panel));
+  color: var(--kd-blue-800);
 }
 
 .msg-head {

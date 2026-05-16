@@ -1,5 +1,6 @@
-@layer tokens, app;
+@layer theme, tokens, app, utilities;
 
+@import "./tailwind.css";
 @import "./tokens.css" layer(tokens);
 @import "./base.css" layer(app);
 @import "./shell.css" layer(app);

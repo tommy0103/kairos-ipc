@@ -1,0 +1,24 @@
+@import "tailwindcss/theme" layer(theme);
+@import "tailwindcss/utilities" layer(utilities);
+
+@theme inline {
+  --color-kd-canvas: var(--kd-canvas);
+  --color-kd-panel: var(--kd-panel);
+  --color-kd-sidebar: var(--kd-sidebar);
+  --color-kd-sidebar-strong: var(--kd-sidebar-strong);
+  --color-kd-border: var(--kd-border);
+  --color-kd-border-strong: var(--kd-border-strong);
+  --color-kd-ink: var(--kd-ink);
+  --color-kd-text: var(--kd-text);
+  --color-kd-muted: var(--kd-muted);
+  --color-kd-blue: var(--kd-blue);
+  --color-kd-blue-soft: var(--kd-blue-soft);
+  --color-kd-blue-hover: var(--kd-blue-hover);
+  --color-kd-attention-wash: var(--kd-attention-wash);
+  --color-kd-attention-line: var(--kd-attention-line);
+  --color-kd-red-soft: var(--kd-red-soft);
+  --color-kd-green-soft: var(--kd-green-soft);
+  --font-sans: var(--kd-font);
+  --shadow-kd: var(--kd-shadow);
+  --shadow-kd-focus: var(--kd-focus);
+}

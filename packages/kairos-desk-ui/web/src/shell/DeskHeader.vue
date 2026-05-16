@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { Bot, FileText, FolderKanban, Info, PanelRight, Radar } from "lucide-vue-next";
+import { Bot, FileText, FolderKanban, Radar } from "lucide-vue-next";
 import type { ProjectProjection, RoomProjection, Surface, WorkCardProjection } from "@/api/types";
+import KBadge from "@/ui/KBadge.vue";
+import KHeaderAction from "@/ui/KHeaderAction.vue";
 
 const props = defineProps<{
   activeSurface: Surface;
@@ -8,13 +10,10 @@ const props = defineProps<{
   project: ProjectProjection;
   workCard: WorkCardProjection | null;
   artifactTargetId: string;
-  inspectorOpen: boolean;
-  inspectorAvailable: boolean;
 }>();
 
 const emit = defineEmits<{
   navigate: [surface: Surface, targetId?: string];
-  toggleInspector: [];
 }>();
 
 function title(): string {
@@ -73,44 +72,29 @@ function topic(): string {
     <div>
       <div class="surface-title">
         <span>{{ title() }}</span>
-        <span v-if="activeSurface === 'rooms'" class="pill">{{ room.agentIds.length }} agents</span>
-        <span v-if="activeSurface === 'projects'" class="pill warn">Phase: {{ project.phase }}</span>
-        <span v-if="activeSurface === 'work' && workCard" class="pill warn">{{ workCard.status }}</span>
+        <KBadge v-if="activeSurface === 'rooms'">{{ room.agentIds.length }} agents</KBadge>
+        <KBadge v-if="activeSurface === 'projects'" tone="warn">Phase: {{ project.phase }}</KBadge>
+        <KBadge v-if="activeSurface === 'work' && workCard" tone="warn">{{ workCard.status }}</KBadge>
       </div>
       <div class="surface-topic">{{ topic() }}</div>
     </div>
     <div class="header-actions" aria-label="Context shortcuts">
-      <button class="icon-button" :class="{ active: activeSurface === 'projects' || activeSurface === 'work' || activeSurface === 'diff' }" type="button" @click="emit('navigate', 'projects')">
+      <KHeaderAction :active="activeSurface === 'projects' || activeSurface === 'work' || activeSurface === 'diff'" @click="emit('navigate', 'projects')">
         <FolderKanban :size="15" aria-hidden="true" />
         Project
-      </button>
-      <button class="icon-button" :class="{ active: activeSurface === 'artifact' }" type="button" @click="emit('navigate', 'artifact', props.artifactTargetId)">
+      </KHeaderAction>
+      <KHeaderAction :active="activeSurface === 'artifact'" @click="emit('navigate', 'artifact', props.artifactTargetId)">
         <FileText :size="15" aria-hidden="true" />
         Artifacts
-      </button>
-      <button class="icon-button" :class="{ active: activeSurface === 'observe' }" type="button" @click="emit('navigate', 'observe')">
+      </KHeaderAction>
+      <KHeaderAction :active="activeSurface === 'observe'" @click="emit('navigate', 'observe')">
         <Radar :size="15" aria-hidden="true" />
         Trace
-      </button>
-      <button class="icon-button" :class="{ active: activeSurface === 'agents' }" type="button" @click="emit('navigate', 'agents')">
+      </KHeaderAction>
+      <KHeaderAction :active="activeSurface === 'agents'" @click="emit('navigate', 'agents')">
         <Bot :size="15" aria-hidden="true" />
         Agents
-      </button>
-      <button class="icon-button" type="button" title="Room info" aria-label="Room info">
-        <Info :size="15" aria-hidden="true" />
-      </button>
-      <button
-        class="icon-button"
-        :class="{ active: inspectorOpen }"
-        type="button"
-        :title="inspectorOpen ? 'Collapse context inspector' : 'Open context inspector'"
-        :aria-label="inspectorOpen ? 'Collapse context inspector' : 'Open context inspector'"
-        :aria-pressed="inspectorOpen"
-        :disabled="!inspectorAvailable"
-        @click="emit('toggleInspector')"
-      >
-        <PanelRight :size="15" aria-hidden="true" />
-      </button>
+      </KHeaderAction>
     </div>
   </header>
 </template>

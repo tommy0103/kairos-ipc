@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ArrowRight, FileCode2, MessageSquareText } from "lucide-vue-next";
 import { computed } from "vue";
-import type { ArtifactDetailProjection, ObserveProjection, PatchSetProjection, ProjectProjection, RoomProjection, Surface, WorkCardProjection } from "@/api/types";
+import type { ArtifactDetailProjection, ObserveProjection, PatchSetProjection, ProjectPhase, ProjectProjection, RoomProjection, Surface, WorkCardProjection } from "@/api/types";
 
 const props = defineProps<{
   project: ProjectProjection;
@@ -28,6 +28,40 @@ const cardEvidence = computed(() =>
 const needsHumanReview = computed(() => props.card.status === "needs-human");
 const reviewArtifact = computed(() => cardArtifacts.value.find((artifact) => artifact.status === "ready") ?? cardArtifacts.value[0] ?? null);
 const primaryPatchSet = computed(() => cardPatchSets.value[0] ?? null);
+const phases: ProjectPhase[] = ["Decide", "Build", "Review", "Validate", "Done"];
+const currentPhaseIndex = computed(() => Math.max(0, phases.indexOf(props.card.phase)));
+const workMapSteps = computed(() => [
+  {
+    id: "phase",
+    label: props.card.phase,
+    value: currentPhaseIndex.value + 1,
+    state: props.card.status === "failed" || props.card.status === "blocked" ? props.card.status : "current",
+  },
+  {
+    id: "patch",
+    label: "Patch",
+    value: changedFiles.value.length,
+    state: changedFiles.value.length ? "complete" : "quiet",
+  },
+  {
+    id: "artifact",
+    label: "Artifact",
+    value: cardArtifacts.value.length,
+    state: reviewArtifact.value ? "complete" : "quiet",
+  },
+  {
+    id: "evidence",
+    label: "Evidence",
+    value: cardEvidence.value.length,
+    state: cardEvidence.value.length ? "complete" : "quiet",
+  },
+  {
+    id: "human",
+    label: needsHumanReview.value ? "Needs you" : "Clear",
+    value: needsHumanReview.value ? 1 : 0,
+    state: needsHumanReview.value ? "needs-human" : props.card.status === "done" ? "complete" : "quiet",
+  },
+]);
 const reviewCopy = computed(() => {
   if (primaryPatchSet.value) {
     return "The patch is written. Check the diff, then return to the room if you want another pass.";
@@ -68,6 +102,12 @@ function fileStatusLabel(status: (typeof changedFiles.value)[number]["file"]["st
   if (status === "deleted") return "D";
   if (status === "added") return "A";
   return "R";
+}
+
+function changeBalanceStyle(kind: "added" | "removed"): Record<string, string> {
+  const total = Math.max(1, (primaryPatchSet.value?.addedLines ?? 0) + (primaryPatchSet.value?.removedLines ?? 0));
+  const value = kind === "added" ? primaryPatchSet.value?.addedLines ?? 0 : primaryPatchSet.value?.removedLines ?? 0;
+  return { width: `${Math.max(value ? 8 : 0, (value / total) * 100)}%` };
 }
 
 function openDiff(patchSetId: string, fileId?: string): void {
@@ -113,6 +153,12 @@ function discussInRoom(): void {
           </div>
           <div class="work-detail-copy">
             <p>{{ card.summary }}</p>
+          </div>
+          <div class="work-execution-map" aria-label="Work execution map">
+            <div v-for="step in workMapSteps" :key="step.id" class="work-map-step" :class="step.state">
+              <span class="work-map-node" aria-hidden="true">{{ step.value }}</span>
+              <span class="work-map-label">{{ step.label }}</span>
+            </div>
           </div>
           <div v-if="needsHumanReview" class="work-review-action" aria-label="Work ready for review">
             <div class="work-review-copy">
@@ -161,6 +207,10 @@ function discussInRoom(): void {
             <span v-else>0</span>
           </div>
           <div v-if="changedFiles.length" class="changed-file-list">
+            <div v-if="primaryPatchSet" class="changed-file-balance" aria-label="Patch line balance">
+              <span class="added" :style="changeBalanceStyle('added')"></span>
+              <span class="removed" :style="changeBalanceStyle('removed')"></span>
+            </div>
             <button v-for="entry in changedFiles" :key="`${entry.patchSet.id}:${entry.file.id}`" class="changed-file-row" type="button" @click="openDiff(entry.patchSet.id, entry.file.id)">
               <FileCode2 :size="14" aria-hidden="true" />
               <span class="changed-file-path">{{ entry.file.path }}</span>
